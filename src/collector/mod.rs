@@ -5,6 +5,7 @@ pub mod mcp;
 pub mod opencode;
 pub mod process;
 pub mod rate_limit;
+pub mod remote;
 
 pub use claude::ClaudeCollector;
 pub use codex::CodexCollector;

@@ -8,6 +8,7 @@ mod mcp;
 mod ports;
 mod projects;
 mod quota;
+mod remote;
 mod sessions;
 mod tokens;
 mod view_menu;
@@ -295,6 +296,7 @@ pub(crate) enum ClickTarget {
 
 struct DesktopLayout {
     header: Rect,
+    remote: Option<Rect>,
     context: Option<Rect>,
     mid: Vec<(NarrowSection, Rect)>,
     sessions: Option<Rect>,
@@ -409,6 +411,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     }
 
+    if let Some(area) = layout.remote {
+        remote::draw_remote_panel(f, app, area, theme);
+    }
     if let Some(area) = layout.sessions {
         sessions::draw_sessions_panel(f, app, area, theme);
     }
@@ -456,7 +461,10 @@ fn desktop_layout(app: &App, area: Rect) -> DesktopLayout {
 
     let available = area.height.saturating_sub(fixed);
     let mid_reserved = if any_mid { MID_MIN.min(available) } else { 0 };
-    let sessions_budget = available.saturating_sub(mid_reserved);
+    // Remote hosts panel: wants all its rows, but reserves at most a third of the screen.
+    let remote_ideal = remote::remote_rows(app).map_or(0, |r| r + 2);
+    let remote_reserved = remote_ideal.min(available / 3);
+    let sessions_budget = available.saturating_sub(mid_reserved + remote_reserved);
     let sessions_h = if app.show_sessions {
         sessions_ideal
             .min(sessions_budget)
@@ -472,7 +480,10 @@ fn desktop_layout(app: &App, area: Rect) -> DesktopLayout {
     } else {
         0
     };
-    let surplus = available.saturating_sub(sessions_h + mid_h);
+    let remote_h = remote_ideal
+        .min(available.saturating_sub(sessions_h + mid_h))
+        .max(remote_reserved.min(available.saturating_sub(sessions_h + mid_h)));
+    let surplus = available.saturating_sub(sessions_h + mid_h + remote_h);
     let context_h = if app.show_context && sessions_h >= sessions_ideal && surplus >= CONTEXT_MIN {
         context_ideal.min(surplus)
     } else if app.show_context && !app.show_sessions && surplus >= CONTEXT_MIN {
@@ -481,7 +492,7 @@ fn desktop_layout(app: &App, area: Rect) -> DesktopLayout {
         0
     };
 
-    let mut constraints = [Constraint::Length(0); 5];
+    let mut constraints = [Constraint::Length(0); 6];
     let mut n = 0;
     constraints[n] = Constraint::Length(header_h);
     n += 1;
@@ -491,6 +502,10 @@ fn desktop_layout(app: &App, area: Rect) -> DesktopLayout {
     }
     if mid_h > 0 {
         constraints[n] = Constraint::Length(mid_h);
+        n += 1;
+    }
+    if remote_h > 0 {
+        constraints[n] = Constraint::Length(remote_h);
         n += 1;
     }
     if sessions_h > 0 {
@@ -534,6 +549,14 @@ fn desktop_layout(app: &App, area: Rect) -> DesktopLayout {
         Vec::new()
     };
 
+    let remote = if remote_h > 0 {
+        let area = chunks[idx];
+        idx += 1;
+        Some(area)
+    } else {
+        None
+    };
+
     let sessions = if sessions_h > 0 {
         let area = chunks[idx];
         idx += 1;
@@ -544,6 +567,7 @@ fn desktop_layout(app: &App, area: Rect) -> DesktopLayout {
 
     DesktopLayout {
         header,
+        remote,
         context,
         mid,
         sessions,

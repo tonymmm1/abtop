@@ -233,6 +233,10 @@ fn run_app(
         app.tick();
         app.cliproxy = collector::cliproxy::resolve(&cfg.cliproxy_url, &cfg.cliproxy_key)
             .map(|(url, key)| collector::cliproxy::start(url, key));
+        let hosts = collector::remote::load_hosts();
+        if !hosts.is_empty() {
+            app.remote = Some(collector::remote::start(hosts));
+        }
     }
     app.accounts_open = std::env::args().any(|a| a == "--accounts");
 

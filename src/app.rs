@@ -156,6 +156,8 @@ pub struct App {
     /// Full-screen CLIProxyAPI accounts view (`a`).
     pub accounts_open: bool,
     pub accounts_scroll: u16,
+    /// SSH pollers for `~/.config/abtop/hosts.toml`; None when no hosts are configured.
+    pub remote: Option<crate::collector::remote::Handle>,
     /// Background CLIProxyAPI quota poller; None when no management key is configured.
     pub cliproxy: Option<crate::collector::cliproxy::Handle>,
 }
@@ -229,6 +231,7 @@ impl App {
             accounts_open: false,
             accounts_scroll: 0,
             cliproxy: None,
+            remote: None,
         }
     }
 
