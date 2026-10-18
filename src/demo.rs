@@ -586,7 +586,12 @@ pub fn populate_demo(app: &mut App) {
     app.host_metrics = Some(crate::host_info::HostMetrics {
         cpu_pct: 23.0,
         mem_pct: 41.0,
+        mem_used_gib: 13.1,
+        mem_total_gib: 32.0,
+        cores: 16,
         load1: 1.8,
+        net_rx_bps: 1_240_000.0,
+        net_tx_bps: 86_000.0,
     });
     app.agent_aggregate = crate::host_info::AgentAggregate::from_sessions(&app.sessions);
 }
