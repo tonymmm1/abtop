@@ -418,33 +418,36 @@ impl MultiCollector {
             all.extend(collector.collect(&shared));
         }
 
-        // Git stats: refresh only on slow tick
-        if slow_tick {
-            self.cached_git.clear();
-            for s in &mut all {
-                let stats = process::collect_git_stats(&s.cwd);
-                self.cached_git.insert(s.cwd.clone(), stats);
-                s.git_added = stats.0;
-                s.git_modified = stats.1;
-            }
-        } else {
-            for s in &mut all {
-                if let Some(&(added, modified)) = self.cached_git.get(&s.cwd) {
-                    s.git_added = added;
-                    s.git_modified = modified;
-                } else {
-                    // New cwd not yet in cache — compute on demand to avoid false clean
-                    let stats = process::collect_git_stats(&s.cwd);
-                    self.cached_git.insert(s.cwd.clone(), stats);
-                    s.git_added = stats.0;
-                    s.git_modified = stats.1;
-                }
-            }
-        }
-
         // Hide dead sessions: Codex uses pid==0 sentinel, Claude is filtered in collect().
         all.retain(|s| !matches!(s.status, SessionStatus::Done));
         all.sort_by_key(|s| std::cmp::Reverse(s.started_at));
+
+        // Git stats: refresh on slow tick, plus any cwd not yet cached (avoids a
+        // false clean). One `git status` per unique cwd, in parallel: large
+        // worktrees take ~1s each, which serially dominated startup.
+        // ponytail: one thread per cwd, add a pool if session dirs reach the hundreds.
+        if slow_tick {
+            self.cached_git.clear();
+        }
+        let missing: std::collections::BTreeSet<&str> = all
+            .iter()
+            .map(|s| s.cwd.as_str())
+            .filter(|cwd| !self.cached_git.contains_key(*cwd))
+            .collect();
+        let fresh: Vec<(String, (u32, u32))> = std::thread::scope(|sc| {
+            let handles: Vec<_> = missing
+                .into_iter()
+                .map(|cwd| sc.spawn(move || (cwd.to_string(), process::collect_git_stats(cwd))))
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        });
+        self.cached_git.extend(fresh);
+        for s in &mut all {
+            if let Some(&(added, modified)) = self.cached_git.get(&s.cwd) {
+                s.git_added = added;
+                s.git_modified = modified;
+            }
+        }
 
         // --- Orphan port detection ---
         // 1. Update tracked port children from live sessions

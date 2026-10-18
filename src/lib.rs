@@ -230,7 +230,8 @@ fn run_app(
     if demo_mode {
         demo::populate_demo(&mut app);
     } else {
-        app.tick();
+        // Start the background pollers and paint once before the first
+        // (blocking) data tick, so the window appears immediately.
         app.cliproxy = collector::cliproxy::resolve(&cfg.cliproxy_url, &cfg.cliproxy_key)
             .map(|(url, key)| collector::cliproxy::start(url, key));
         let hosts = collector::remote::load_hosts();
@@ -239,6 +240,12 @@ fn run_app(
         }
     }
     app.accounts_open = std::env::args().any(|a| a == "--accounts");
+    if !demo_mode {
+        app.set_status("loading sessions…".into());
+        terminal.draw(|f| ui::draw(f, &app))?;
+        app.tick();
+        app.status_msg = None;
+    }
 
     let mut last_tick = std::time::Instant::now();
     let tick_interval = Duration::from_secs(2);
