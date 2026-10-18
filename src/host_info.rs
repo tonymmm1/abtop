@@ -313,6 +313,92 @@ mod windows_impl {
     }
 }
 
+/// One GPU's utilization and VRAM.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GpuInfo {
+    pub name: String,
+    pub util_pct: f64,
+    pub mem_used_mb: f64,
+    pub mem_total_mb: f64,
+}
+
+/// NVIDIA GPUs via `nvidia-smi`, then AMD GPUs via sysfs. Empty when neither exists.
+pub fn sample_gpus() -> Vec<GpuInfo> {
+    let mut gpus = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,utilization.gpu,memory.used,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| parse_nvidia_smi(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default();
+    gpus.extend(sample_amd_gpus());
+    gpus
+}
+
+pub(crate) fn parse_nvidia_smi(out: &str) -> Vec<GpuInfo> {
+    out.lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split(',').map(str::trim).collect();
+            let num = |i: usize| f.get(i)?.parse::<f64>().ok();
+            Some(GpuInfo {
+                name: f
+                    .first()?
+                    .trim_start_matches("NVIDIA ")
+                    .trim_start_matches("GeForce ")
+                    .to_string(),
+                util_pct: num(1)?,
+                mem_used_mb: num(2)?,
+                mem_total_mb: num(3)?,
+            })
+        })
+        .collect()
+}
+
+/// amdgpu exposes `gpu_busy_percent` and `mem_info_vram_*` (bytes) per card.
+#[cfg(target_os = "linux")]
+fn sample_amd_gpus() -> Vec<GpuInfo> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+        return Vec::new();
+    };
+    let mut cards: Vec<_> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("card") && !n.contains('-'))
+        })
+        .collect();
+    cards.sort();
+    cards
+        .iter()
+        .filter_map(|card| {
+            let read = |f: &str| -> Option<f64> {
+                std::fs::read_to_string(card.join("device").join(f))
+                    .ok()?
+                    .trim()
+                    .parse()
+                    .ok()
+            };
+            let mb = 1024.0 * 1024.0;
+            Some(GpuInfo {
+                name: "AMD".into(),
+                util_pct: read("gpu_busy_percent")?,
+                mem_used_mb: read("mem_info_vram_used")? / mb,
+                mem_total_mb: read("mem_info_vram_total")? / mb,
+            })
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sample_amd_gpus() -> Vec<GpuInfo> {
+    Vec::new()
+}
+
 /// Aggregate per-session metrics into a single agent-wide summary.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct AgentAggregate {
@@ -362,5 +448,16 @@ eth0: 1000 5 0 0 0 0 0 0 200 3 0 0 0 0 0 0\n \
 wlan0: 50 1 0 0 0 0 0 0 7 1 0 0 0 0 0 0\n\
 docker0: 500 1 0 0 0 0 0 0 500 1 0 0 0 0 0 0\n";
         assert_eq!(super::parse_net_dev(s), (1050, 207));
+    }
+
+    #[test]
+    fn nvidia_smi_rows() {
+        let g = super::parse_nvidia_smi("NVIDIA GeForce RTX 2080 SUPER, 37, 113, 8192\nbad line\n");
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].name, "RTX 2080 SUPER");
+        assert_eq!(
+            (g[0].util_pct, g[0].mem_used_mb, g[0].mem_total_mb),
+            (37.0, 113.0, 8192.0)
+        );
     }
 }

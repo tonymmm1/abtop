@@ -412,8 +412,10 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 fn desktop_layout(app: &App, area: Rect) -> DesktopLayout {
     const CONTEXT_MIN: u16 = 5;
-    const FIXED: u16 = 2; // header + footer
     const MID_MIN: u16 = 6;
+    // Header gets a second row for GPU bars when any GPU is present.
+    let header_h: u16 = if app.gpus.is_empty() { 1 } else { 2 };
+    let fixed: u16 = header_h + 1; // header + footer
 
     let mut mid_sections = Vec::new();
     if app.show_quota {
@@ -441,7 +443,7 @@ fn desktop_layout(app: &App, area: Rect) -> DesktopLayout {
     };
     let context_ideal: u16 = (app.sessions.len() as u16 + 4).clamp(5, 10);
 
-    let available = area.height.saturating_sub(FIXED);
+    let available = area.height.saturating_sub(fixed);
     let mid_reserved = if any_mid { MID_MIN.min(available) } else { 0 };
     let sessions_budget = available.saturating_sub(mid_reserved);
     let sessions_h = if app.show_sessions {
@@ -470,7 +472,7 @@ fn desktop_layout(app: &App, area: Rect) -> DesktopLayout {
 
     let mut constraints = [Constraint::Length(0); 5];
     let mut n = 0;
-    constraints[n] = Constraint::Length(1);
+    constraints[n] = Constraint::Length(header_h);
     n += 1;
     if context_h > 0 {
         constraints[n] = Constraint::Length(context_h);

@@ -143,6 +143,8 @@ pub struct App {
     host_sampler: HostSampler,
     /// Latest host metrics snapshot (None until first valid sample).
     pub host_metrics: Option<HostMetrics>,
+    /// Per-GPU utilization + VRAM (empty when no GPU is detected).
+    pub gpus: Vec<crate::host_info::GpuInfo>,
     /// Aggregate metrics across all sessions (recomputed each tick).
     pub agent_aggregate: AgentAggregate,
     /// Help overlay (`?`) visibility.
@@ -212,6 +214,7 @@ impl App {
             show_file_audit: false,
             host_sampler: HostSampler::new(),
             host_metrics: None,
+            gpus: Vec::new(),
             agent_aggregate: AgentAggregate::default(),
             help_open: false,
             view_open: false,
@@ -511,6 +514,7 @@ impl App {
         self.orphan_ports = self.collector.orphan_ports.clone();
         self.mcp_servers = self.collector.mcp_servers.clone();
         self.host_metrics = self.host_sampler.sample();
+        self.gpus = crate::host_info::sample_gpus();
         self.agent_aggregate = AgentAggregate::from_sessions(&self.sessions);
         if self.selected >= self.sessions.len() && !self.sessions.is_empty() {
             self.selected = self.sessions.len() - 1;

@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::host_info::GpuInfo;
 use crate::locale::t;
 use crate::theme::Theme;
 use ratatui::layout::Rect;
@@ -6,6 +7,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
+
+use super::{grad_at, make_gradient, meter_bar};
 
 pub(crate) fn draw_header(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let session_count = app.sessions.len();
@@ -76,6 +79,72 @@ pub(crate) fn draw_header(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     spans.push(Span::raw("  "));
 
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+
+    if area.height >= 2 && !app.gpus.is_empty() {
+        let row = Rect {
+            y: area.y + 1,
+            height: 1,
+            ..area
+        };
+        f.render_widget(Paragraph::new(gpu_line(&app.gpus, width, theme)), row);
+    }
+}
+
+/// `GPU0 RTX 2080 SUPER ■■■■■■  37%  vram ■■■■■■ 0.1/8.0G` per GPU; names are
+/// dropped first when the row is too narrow.
+fn gpu_line(gpus: &[GpuInfo], width: usize, theme: &Theme) -> Line<'static> {
+    let grad = make_gradient(theme.cpu_grad.start, theme.cpu_grad.mid, theme.cpu_grad.end);
+    let dim = Style::default().fg(theme.graph_text);
+    let build = |with_names: bool, bar_w: usize| -> Vec<Span<'static>> {
+        let mut spans = Vec::new();
+        for (i, g) in gpus.iter().enumerate() {
+            let vram_pct = if g.mem_total_mb > 0.0 {
+                g.mem_used_mb / g.mem_total_mb * 100.0
+            } else {
+                0.0
+            };
+            let name = if with_names {
+                format!(" {}", g.name)
+            } else {
+                String::new()
+            };
+            spans.push(Span::styled(
+                format!(" GPU{i}{name} "),
+                Style::default()
+                    .fg(theme.title)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.extend(meter_bar(g.util_pct, bar_w, &grad, theme.meter_bg));
+            spans.push(Span::styled(
+                format!(" {:>3.0}%", g.util_pct),
+                Style::default().fg(grad_at(&grad, g.util_pct)),
+            ));
+            spans.push(Span::styled("  vram ", dim));
+            spans.extend(meter_bar(vram_pct, bar_w, &grad, theme.meter_bg));
+            spans.push(Span::styled(
+                format!(
+                    " {:.1}/{:.1}G  ",
+                    g.mem_used_mb / 1024.0,
+                    g.mem_total_mb / 1024.0
+                ),
+                Style::default().fg(grad_at(&grad, vram_pct)),
+            ));
+        }
+        spans
+    };
+    let fits = |spans: &[Span]| {
+        spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum::<usize>()
+            <= width
+    };
+    let spans = [(true, 8), (false, 8), (false, 4)]
+        .into_iter()
+        .map(|(names, bar)| build(names, bar))
+        .find(|s| fits(s))
+        .unwrap_or_else(|| build(false, 2));
+    Line::from(spans)
 }
 
 fn fmt_host(h: &crate::host_info::HostMetrics) -> String {
