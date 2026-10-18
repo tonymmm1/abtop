@@ -60,6 +60,7 @@ pub const THEME_NAMES: &[&str] = &[
     "protanopia",
     "deuteranopia",
     "tritanopia",
+    "matrix",
 ];
 
 impl Theme {
@@ -77,6 +78,7 @@ impl Theme {
             "protanopia" => Some(Self::protanopia()),
             "deuteranopia" => Some(Self::deuteranopia()),
             "tritanopia" => Some(Self::tritanopia()),
+            "matrix" => Some(Self::matrix()),
             _ => None,
         }
     }
@@ -530,6 +532,58 @@ impl Theme {
                 start: (32, 32, 32),
                 mid: (128, 128, 255),
                 end: (255, 255, 255),
+            },
+        }
+    }
+
+    /// Matrix — phosphor green on pure black. Three green tiers keep text
+    /// hierarchy readable (all ≥ 4.5:1 on black); amber/red stay reserved for
+    /// warnings and exhausted quota so they still stand out.
+    pub fn matrix() -> Self {
+        Self {
+            name: "matrix",
+            main_bg: Color::Rgb(0, 0, 0),
+            main_fg: Color::Rgb(0, 255, 65),
+            title: Color::Rgb(190, 255, 200),
+            hi_fg: Color::Rgb(255, 255, 255),
+            selected_bg: Color::Rgb(0, 95, 30),
+            selected_fg: Color::Rgb(230, 255, 230),
+            inactive_fg: Color::Rgb(0, 150, 45),
+            graph_text: Color::Rgb(0, 205, 60),
+            meter_bg: Color::Rgb(0, 50, 18),
+            proc_misc: Color::Rgb(130, 255, 170),
+            div_line: Color::Rgb(0, 100, 32),
+            session_id: Color::Rgb(180, 255, 60),
+            status_fg: Color::Rgb(0, 255, 65),
+            warning_fg: Color::Rgb(255, 190, 0),
+            cpu_box: Color::Rgb(0, 175, 52),
+            mem_box: Color::Rgb(0, 175, 52),
+            net_box: Color::Rgb(0, 175, 52),
+            proc_box: Color::Rgb(0, 175, 52),
+            cpu_grad: Gradient {
+                start: (0, 255, 65),
+                mid: (200, 255, 0),
+                end: (255, 70, 70),
+            },
+            proc_grad: Gradient {
+                start: (0, 130, 40),
+                mid: (0, 255, 65),
+                end: (210, 255, 210),
+            },
+            used_grad: Gradient {
+                start: (0, 90, 30),
+                mid: (0, 255, 65),
+                end: (255, 190, 0),
+            },
+            free_grad: Gradient {
+                start: (0, 90, 30),
+                mid: (0, 200, 60),
+                end: (0, 255, 65),
+            },
+            cached_grad: Gradient {
+                start: (0, 90, 30),
+                mid: (100, 230, 140),
+                end: (210, 255, 210),
             },
         }
     }
