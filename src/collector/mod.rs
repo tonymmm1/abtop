@@ -1,4 +1,5 @@
 pub mod claude;
+pub mod cliproxy;
 pub mod codex;
 pub mod mcp;
 pub mod opencode;

@@ -1,13 +1,15 @@
 use crate::app::App;
+use crate::collector::cliproxy::{summarize, Account, State, Summary};
 use crate::locale::t;
 use crate::model::RateLimitInfo;
 use crate::theme::Theme;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
+use super::accounts::local_date;
 use super::{btop_block_active, fmt_tokens, grad_at, make_gradient, remaining_bar, styled_label};
 
 /// Data considered "stale" when its updated_at is older than this many seconds.
@@ -38,6 +40,12 @@ pub(crate) fn draw_quota_panel_active(
         width: area.width.saturating_sub(2),
         height: area.height.saturating_sub(2),
     };
+
+    // CLIProxyAPI pools take the whole box; the tokens panel already shows totals.
+    if let Some(state) = app.cliproxy.as_ref().and_then(|h| h.state.lock().ok()) {
+        draw_cliproxy_rows(f, inner, &state, &cpu_grad, theme);
+        return;
+    }
 
     // Bottom summary: total tokens + rate
     let total_tokens: u64 = app.sessions.iter().map(|s| s.total_tokens()).sum();
@@ -233,6 +241,234 @@ fn draw_source_column(
     }
 
     f.render_widget(Paragraph::new(lines), area);
+}
+
+/// Pooled CLIProxyAPI quota per provider (`7d  43% of 300% ■■■  in 51m`),
+/// followed by every active account with its own bars and reset timers.
+fn draw_cliproxy_rows(
+    f: &mut Frame,
+    area: Rect,
+    state: &State,
+    cpu_grad: &[ratatui::style::Color; 101],
+    theme: &Theme,
+) {
+    let dim = Style::default().fg(theme.graph_text);
+    let bold = |c| Style::default().fg(c).add_modifier(Modifier::BOLD);
+    let now = chrono::Utc::now().timestamp();
+    let width = area.width as usize;
+    let mut lines = Vec::new();
+
+    let amount = |s: &Summary| format!("{:.0}% of {}%", s.sum, s.count * 100);
+    let per_source: Vec<Vec<Summary>> = SOURCES
+        .iter()
+        .map(|src| summarize(&state.accounts, src, now))
+        .collect();
+    // Shared column widths so both providers line up.
+    let all = per_source.iter().flatten();
+    let label_w = all
+        .clone()
+        .map(|s| short_label(&s.label).chars().count())
+        .max()
+        .unwrap_or(2);
+    let amount_w = all.map(|s| amount(s).chars().count()).max().unwrap_or(0);
+    // "  label amount " then the bar
+    let bar_w = width.saturating_sub(label_w + amount_w + 5).min(20);
+
+    // Disabled accounts only appear in the full accounts view (`a`).
+    let active: Vec<&Account> = state.accounts.iter().filter(|a| !a.disabled).collect();
+    let max_windows = active
+        .iter()
+        .map(|a| a.windows.len())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let cell_w = (width.saturating_sub(account_prefix_w(width)) / max_windows)
+        .clamp(label_w + 8, label_w + 20);
+
+    for (i, (source, summaries)) in SOURCES.iter().zip(per_source).enumerate() {
+        let accounts: Vec<&Account> = active
+            .iter()
+            .copied()
+            .filter(|a| a.provider == *source)
+            .collect();
+        if i > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {}", source.to_uppercase()), bold(theme.title)),
+            Span::styled(format!(" ×{}", accounts.len()), dim),
+        ]));
+        if summaries.is_empty() {
+            let msg = match (&state.error, state.loading) {
+                (Some(e), _) => e.clone(),
+                (None, true) => "loading…".into(),
+                _ => format!("— {}", t("quota.no_data")),
+            };
+            lines.push(Line::from(Span::styled(format!("  {msg}"), dim)));
+        }
+        for s in &summaries {
+            let pooled = s.pooled();
+            let (label, amount) = (short_label(&s.label), amount(s));
+            let mut spans = vec![
+                Span::styled(format!("  {label:<label_w$} "), bold(theme.main_fg)),
+                Span::styled(
+                    format!("{amount:>amount_w$} "),
+                    bold(grad_at(cpu_grad, 100.0 - pooled)),
+                ),
+            ];
+            if bar_w >= 2 {
+                spans.extend(remaining_bar(pooled, bar_w, cpu_grad, theme.meter_bg));
+            }
+            let used = label_w + amount_w + 4 + bar_w;
+            if let Some(reset) = s.next_reset.map(|t| format_reset_time(t as u64)) {
+                if used + reset.chars().count() + 2 <= width {
+                    spans.push(Span::styled(format!("  {reset}"), dim));
+                }
+            }
+            lines.push(Line::from(spans));
+        }
+        if !accounts.is_empty() {
+            lines.push(Line::from(""));
+        }
+        for a in accounts {
+            lines.extend(account_lines(a, width, label_w, cell_w, cpu_grad, theme));
+        }
+    }
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+/// Two lines per account: a bar + percentage per window, then reset timers
+/// under each window with cooldown / subscription status under the name.
+fn account_lines(
+    a: &Account,
+    width: usize,
+    label_w: usize,
+    cell_w: usize,
+    cpu_grad: &[ratatui::style::Color; 101],
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(theme.graph_text);
+    let name_w = account_name_w(width);
+    let prefix_w = account_prefix_w(width);
+    let ncells = width.saturating_sub(prefix_w) / cell_w;
+    // cell: "label ■■■■  42%  "
+    let bar_w = cell_w.saturating_sub(label_w + 8).min(12);
+
+    let mut top = vec![
+        Span::styled(
+            format!("   {}", fit(&a.name, name_w)),
+            Style::default().fg(theme.main_fg),
+        ),
+        Span::styled(
+            format!(" {} ", fit(a.plan.as_deref().unwrap_or("—"), 8)),
+            dim,
+        ),
+    ];
+    let (status, status_style) = match (a.cooldown_until, a.renews_at) {
+        (Some(t), _) => (
+            format!("cooldown {}", local_date(t)),
+            Style::default().fg(Color::Yellow),
+        ),
+        (None, Some(t)) => (format!("active until {}", local_date(t)), dim),
+        _ => (String::new(), dim),
+    };
+    let mut bottom = vec![Span::styled(
+        fit(&format!("    {status}"), prefix_w),
+        status_style,
+    )];
+
+    if let Some(err) = &a.error {
+        let room = width.saturating_sub(prefix_w);
+        top.push(Span::styled(
+            fit(err, room).trim_end().to_string(),
+            Style::default().fg(Color::Red),
+        ));
+        return vec![Line::from(top), Line::from(bottom)];
+    }
+    for w in a.windows.iter().take(ncells) {
+        top.push(Span::styled(
+            format!("{:<label_w$} ", short_label(&w.label)),
+            dim,
+        ));
+        if bar_w >= 2 {
+            let r = w.remaining.unwrap_or(0.0);
+            top.extend(remaining_bar(r, bar_w, cpu_grad, theme.meter_bg));
+        }
+        let pct_w = cell_w - label_w - 1 - bar_w;
+        top.push(match w.remaining {
+            Some(r) => Span::styled(
+                format!("{:<pct_w$}", format!(" {r:>3.0}%")),
+                Style::default().fg(grad_at(cpu_grad, 100.0 - r)),
+            ),
+            None => Span::styled(format!("{:<pct_w$}", "   —"), dim),
+        });
+        let reset = w
+            .resets_at
+            .map(|t| format_reset_time(t as u64))
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| "—".into());
+        bottom.push(Span::styled(fit(&reset, cell_w), dim));
+    }
+    vec![Line::from(top), Line::from(bottom)]
+}
+
+fn account_name_w(width: usize) -> usize {
+    (width / 4).clamp(10, 26)
+}
+
+/// Columns before the first window cell: indent + name + plan.
+fn account_prefix_w(width: usize) -> usize {
+    3 + account_name_w(width) + 10
+}
+
+/// Rows the CLIProxyAPI quota box wants (excluding borders), for layout sizing.
+/// Must mirror `draw_cliproxy_rows`.
+pub(crate) fn cliproxy_rows(app: &App) -> Option<u16> {
+    let state = app.cliproxy.as_ref()?.state.lock().ok()?;
+    let now = chrono::Utc::now().timestamp();
+    let rows: usize = SOURCES
+        .iter()
+        .map(|src| {
+            let accounts = state
+                .accounts
+                .iter()
+                .filter(|a| a.provider == *src && !a.disabled)
+                .count();
+            let pooled = summarize(&state.accounts, src, now).len().max(1);
+            // header + pooled rows + blank + 2 per account
+            1 + pooled + usize::from(accounts > 0) + 2 * accounts
+        })
+        .sum();
+    // blank line between providers
+    Some((rows + SOURCES.len() - 1) as u16)
+}
+
+/// Truncate with an ellipsis or right-pad to exactly `w` chars.
+fn fit(s: &str, w: usize) -> String {
+    let n = s.chars().count();
+    if n > w {
+        let mut t: String = s.chars().take(w.saturating_sub(1)).collect();
+        t.push('…');
+        t
+    } else {
+        format!("{s}{}", " ".repeat(w - n))
+    }
+}
+
+/// "5-hour limit" → "5h", "7-day Fable 5" → "fable"; keeps the panel narrow.
+fn short_label(label: &str) -> String {
+    let l = label.trim_end_matches(" limit");
+    match l {
+        "5-hour" => "5h".into(),
+        "7-day" => "7d".into(),
+        "Weekly" => "wk".into(),
+        "Monthly" => "mo".into(),
+        _ => l
+            .strip_prefix("7-day ")
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap_or(l)
+            .to_lowercase(),
+    }
 }
 
 fn format_window_label(window_minutes: Option<u64>, fallback: String) -> String {

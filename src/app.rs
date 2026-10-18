@@ -153,6 +153,11 @@ pub struct App {
     pub help_open: bool,
     /// View leader overlay (`v`) visibility.
     pub view_open: bool,
+    /// Full-screen CLIProxyAPI accounts view (`a`).
+    pub accounts_open: bool,
+    pub accounts_scroll: u16,
+    /// Background CLIProxyAPI quota poller; None when no management key is configured.
+    pub cliproxy: Option<crate::collector::cliproxy::Handle>,
 }
 
 impl App {
@@ -221,6 +226,9 @@ impl App {
             agent_aggregate: AgentAggregate::default(),
             help_open: false,
             view_open: false,
+            accounts_open: false,
+            accounts_scroll: 0,
+            cliproxy: None,
         }
     }
 

@@ -1,3 +1,4 @@
+mod accounts;
 mod config;
 mod context;
 mod footer;
@@ -384,6 +385,12 @@ pub fn draw(f: &mut Frame, app: &App) {
         return;
     }
 
+    if app.accounts_open {
+        accounts::draw_accounts(f, app, area, theme);
+        draw_overlays(f, app, theme);
+        return;
+    }
+
     let layout = desktop_layout(app, area);
     header::draw_header(f, app, layout.header, theme);
 
@@ -435,7 +442,11 @@ fn desktop_layout(app: &App, area: Rect) -> DesktopLayout {
     }
 
     let any_mid = !mid_sections.is_empty();
-    let mid_h_ideal: u16 = 8;
+    // The CLIProxyAPI quota box lists every account, so let it grow past the default.
+    let mid_h_ideal: u16 = match app.show_quota.then(|| quota::cliproxy_rows(app)).flatten() {
+        Some(rows) => (rows + 2).max(8),
+        None => 8,
+    };
     let sessions_ideal: u16 = if app.show_sessions {
         (app.sessions.len() as u16 * 2 + 7).max(8)
     } else {

@@ -37,6 +37,12 @@ pub struct AppConfig {
     /// UI language override. Empty string means auto-detect from `LANG`.
     /// Recognized values: "en", "zh" (anything starting with "zh" maps to Simplified Chinese).
     pub language: String,
+    /// CLIProxyAPI management server for the accounts view (`a`).
+    /// Env `CLIPROXY_URL` / `CLIPROXY_MANAGEMENT_KEY` take precedence.
+    pub cliproxy_url: String,
+    pub cliproxy_key: String,
+    /// File holding the key; defaults to `~/.config/abtop/cliproxy.key`.
+    pub cliproxy_key_file: String,
 }
 
 impl Default for AppConfig {
@@ -47,6 +53,9 @@ impl Default for AppConfig {
             claude_config_dirs: Vec::new(),
             panels: PanelVisibility::default(),
             language: String::new(),
+            cliproxy_url: String::new(),
+            cliproxy_key: String::new(),
+            cliproxy_key_file: String::new(),
         }
     }
 }
@@ -56,17 +65,21 @@ fn config_path() -> Option<PathBuf> {
 }
 
 pub fn load_config() -> AppConfig {
-    let path = match config_path() {
-        Some(p) => p,
-        None => return AppConfig::default(),
-    };
-
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return AppConfig::default(),
-    };
-
-    parse_config_body(&content)
+    let mut config = config_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|c| parse_config_body(&c))
+        .unwrap_or_default();
+    if config.cliproxy_key.is_empty() {
+        let file = if config.cliproxy_key_file.is_empty() {
+            config_path().map(|p| p.with_file_name("cliproxy.key"))
+        } else {
+            Some(expand_home_path(&config.cliproxy_key_file))
+        };
+        if let Some(key) = file.and_then(|f| std::fs::read_to_string(f).ok()) {
+            config.cliproxy_key = key.trim().to_string();
+        }
+    }
+    config
 }
 
 fn parse_config_body(content: &str) -> AppConfig {
@@ -80,6 +93,14 @@ fn parse_config_body(content: &str) -> AppConfig {
             let key = key.trim();
             // Strip quotes (double or single) and inline comments
             let val = val.trim();
+            // Keys may contain '#', so read a quoted value up to its closing quote.
+            if key == "cliproxy_key" {
+                config.cliproxy_key = match val.chars().next() {
+                    Some(q @ ('"' | '\'')) => val[1..].split(q).next().unwrap_or("").to_string(),
+                    _ => val.split('#').next().unwrap_or("").trim().to_string(),
+                };
+                continue;
+            }
             let val = if let Some(comment_pos) = val.find('#') {
                 val[..comment_pos].trim()
             } else {
@@ -97,6 +118,8 @@ fn parse_config_body(content: &str) -> AppConfig {
             match key {
                 "theme" => config.theme = val.to_string(),
                 "language" => config.language = val.to_string(),
+                "cliproxy_url" => config.cliproxy_url = val.to_string(),
+                "cliproxy_key_file" => config.cliproxy_key_file = val.to_string(),
                 "show_context" => config.panels.context = parse_bool(val).unwrap_or(true),
                 "show_quota" => config.panels.quota = parse_bool(val).unwrap_or(true),
                 "show_tokens" => config.panels.tokens = parse_bool(val).unwrap_or(true),
