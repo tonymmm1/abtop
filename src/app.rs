@@ -143,6 +143,8 @@ pub struct App {
     host_sampler: HostSampler,
     /// Latest host metrics snapshot (None until first valid sample).
     pub host_metrics: Option<HostMetrics>,
+    /// Per agent: (was working since last alert, consecutive idle ticks).
+    idle_watch: HashMap<&'static str, (bool, u8)>,
     /// Per-GPU utilization + VRAM (empty when no GPU is detected).
     pub gpus: Vec<crate::host_info::GpuInfo>,
     /// Aggregate metrics across all sessions (recomputed each tick).
@@ -215,6 +217,7 @@ impl App {
             host_sampler: HostSampler::new(),
             host_metrics: None,
             gpus: Vec::new(),
+            idle_watch: HashMap::new(),
             agent_aggregate: AgentAggregate::default(),
             help_open: false,
             view_open: false,
@@ -500,6 +503,38 @@ impl App {
     pub fn tick(&mut self) {
         self.tick_no_summaries();
         self.drain_and_retry_summaries();
+        for cli in self.newly_idle_agents() {
+            play_alert();
+            self.set_status(format!("{cli}: no working sessions — start something"));
+        }
+    }
+
+    /// Agents whose working-session count just dropped to 0 and stayed there
+    /// for `IDLE_TICKS` ticks (debounces gaps between tool calls). Each drop
+    /// is reported once; the agent re-arms when it starts working again.
+    fn newly_idle_agents(&mut self) -> Vec<&'static str> {
+        const IDLE_TICKS: u8 = 3;
+        let mut idle = Vec::new();
+        for cli in ["claude", "codex"] {
+            let working = self
+                .sessions
+                .iter()
+                .any(|s| s.agent_cli == cli && s.status.is_active());
+            let (armed, idle_ticks) = self.idle_watch.entry(cli).or_default();
+            if working {
+                (*armed, *idle_ticks) = (true, 0);
+                continue;
+            }
+            if !*armed {
+                continue;
+            }
+            *idle_ticks += 1;
+            if *idle_ticks >= IDLE_TICKS {
+                *armed = false;
+                idle.push(cli);
+            }
+        }
+        idle
     }
 
     /// Refresh all monitored data WITHOUT spawning background summary jobs.
@@ -1013,10 +1048,52 @@ fn is_killable_agent_command(cmd: &str) -> bool {
         && !(crate::collector::process::cmd_has_binary(cmd, "codex") && cmd.contains(" app-server"))
 }
 
+/// Play the freedesktop warning sound, falling back to the terminal bell.
+fn play_alert() {
+    const SOUND: &str = "/usr/share/sounds/freedesktop/stereo/dialog-warning.oga";
+    let spawned = std::path::Path::new(SOUND).exists()
+        && std::process::Command::new("paplay")
+            .arg(SOUND)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|mut child| {
+                // Reap in the background so the player never becomes a zombie.
+                std::thread::spawn(move || child.wait());
+            })
+            .is_ok();
+    if !spawned {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        let _ = out.write_all(b"\x07");
+        let _ = out.flush();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::LaunchSurface;
+
+    #[test]
+    fn idle_alert_fires_once_after_debounce() {
+        let mut app = App::new_with_config(Theme::default(), &[], Default::default());
+        // Never worked: no alert.
+        app.sessions = vec![waiting_session("claude")];
+        assert!(app.newly_idle_agents().is_empty());
+
+        let mut working = waiting_session("claude");
+        working.status = SessionStatus::Executing;
+        app.sessions = vec![working];
+        assert!(app.newly_idle_agents().is_empty());
+
+        app.sessions = vec![waiting_session("claude")];
+        assert!(app.newly_idle_agents().is_empty()); // idle tick 1
+        assert!(app.newly_idle_agents().is_empty()); // idle tick 2
+        assert_eq!(app.newly_idle_agents(), vec!["claude"]); // tick 3 fires
+        assert!(app.newly_idle_agents().is_empty()); // only once
+    }
 
     fn waiting_session(cli: &'static str) -> AgentSession {
         AgentSession {

@@ -1,9 +1,10 @@
 use crate::app::App;
 use crate::host_info::GpuInfo;
 use crate::locale::t;
+use crate::model::SessionStatus;
 use crate::theme::Theme;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -14,11 +15,28 @@ pub(crate) fn draw_header(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let session_count = app.sessions.len();
     let active = app.agent_aggregate.active_count;
 
-    let now = chrono::Local::now().format("%H:%M").to_string();
+    let now = chrono::Local::now().format("%m-%d-%Y %H:%M").to_string();
     let version = env!("CARGO_PKG_VERSION");
 
+    // "claude 5/6" = working / live sessions per agent.
+    let counters: Vec<(String, bool)> = ["claude", "codex"]
+        .iter()
+        .map(|cli| {
+            let live = app
+                .sessions
+                .iter()
+                .filter(|s| s.agent_cli == *cli && s.status != SessionStatus::Done);
+            let working = live.clone().filter(|s| s.status.is_active()).count();
+            (format!("{cli} {working}/{}", live.count()), working == 0)
+        })
+        .collect();
+    let agents = counters
+        .iter()
+        .map(|(c, _)| format!("{c}  "))
+        .collect::<String>();
+
     let title = format!(" abtop v{version} ");
-    let right = format!(" {now}  {active}↑ {session_count}● ");
+    let right = format!(" {agents}{now}  {active}↑ {session_count}● ");
 
     let host_str = app.host_metrics.as_ref().map(fmt_host);
     let agent_str = fmt_agent(&app.agent_aggregate);
@@ -64,8 +82,22 @@ pub(crate) fn draw_header(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     if pad > 0 {
         spans.push(Span::raw(" ".repeat(pad)));
     }
+    spans.push(Span::raw(" "));
+    for (text, idle) in &counters {
+        // Nothing working → black on bright green: time to start something.
+        let style = if *idle {
+            Style::default().fg(Color::Black).bg(Color::Rgb(0, 255, 65))
+        } else {
+            Style::default().fg(theme.main_fg)
+        };
+        spans.push(Span::styled(
+            text.clone(),
+            style.add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw("  "));
+    }
     spans.push(Span::styled(
-        format!(" {now}  "),
+        format!("{now}  "),
         Style::default().fg(theme.graph_text),
     ));
     spans.push(Span::styled(
