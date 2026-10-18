@@ -196,15 +196,7 @@ pub fn run() -> io::Result<()> {
     }
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
-    let app_result = run_app(
-        &mut terminal,
-        demo_mode,
-        initial_theme,
-        exit_on_jump,
-        &cfg.hidden_agents,
-        cfg.panels,
-        &cfg.claude_config_dirs,
-    );
+    let app_result = run_app(&mut terminal, demo_mode, initial_theme, exit_on_jump, &cfg);
 
     // Always attempt both cleanup steps regardless of app result
     let r1 = if mouse_capture {
@@ -232,20 +224,28 @@ fn run_app(
     demo_mode: bool,
     initial_theme: Option<theme::Theme>,
     exit_on_jump: bool,
-    hidden_agents: &[String],
-    panels: config::PanelVisibility,
-    claude_config_dirs: &[std::path::PathBuf],
+    cfg: &config::AppConfig,
 ) -> io::Result<()> {
-    let mut app = App::new_with_config_and_claude_dirs(
-        initial_theme.unwrap_or_default(),
-        hidden_agents,
-        panels,
-        claude_config_dirs,
-    );
+    let mut app = build_app(initial_theme.unwrap_or_default(), cfg);
     if demo_mode {
         demo::populate_demo(&mut app);
     } else {
+        // Start the background pollers and paint once before the first
+        // (blocking) data tick, so the window appears immediately.
+        app.cliproxy = collector::cliproxy::resolve(&cfg.cliproxy_url, &cfg.cliproxy_key)
+            .map(|(url, key)| collector::cliproxy::start(url, key));
+        let hosts = collector::remote::load_hosts();
+        if !hosts.is_empty() {
+            app.remote = Some(collector::remote::start(hosts));
+        }
+        app.ccusage = Some(collector::ccusage::start_local());
+    }
+    app.accounts_open = std::env::args().any(|a| a == "--accounts");
+    if !demo_mode {
+        app.set_status("loading sessions…".into());
+        terminal.draw(|f| ui::draw(f, &app))?;
         app.tick();
+        app.status_msg = None;
     }
 
     let mut last_tick = std::time::Instant::now();
@@ -315,6 +315,25 @@ fn handle_key_press(
             KeyCode::Char('t') => app.cycle_theme(),
             _ => {}
         }
+    } else if app.accounts_open {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('a') => app.accounts_open = false,
+            KeyCode::Char('q') => app.quit(),
+            KeyCode::Char('?') => app.toggle_help(),
+            KeyCode::Char('t') => app.cycle_theme(),
+            KeyCode::Char('r') => {
+                if let Some(h) = &app.cliproxy {
+                    h.refresh();
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.accounts_scroll = app.accounts_scroll.saturating_add(1)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.accounts_scroll = app.accounts_scroll.saturating_sub(1)
+            }
+            _ => {}
+        }
     } else if app.config_open {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => app.toggle_config(),
@@ -355,6 +374,8 @@ fn handle_key_press(
             KeyCode::Char('M') => app.toggle_mcp_session_suppression(),
             KeyCode::Char('c') => app.toggle_config(),
             KeyCode::Char('v') => app.toggle_view_menu(),
+            KeyCode::Char('a') => app.accounts_open = true,
+            KeyCode::Char('U') => app.refresh_ccusage(),
             KeyCode::Char('?') => app.toggle_help(),
             KeyCode::Char('/') => app.filter_active = true,
             KeyCode::Esc if !app.filter_text.is_empty() => app.clear_filter(),
