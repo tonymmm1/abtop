@@ -9,13 +9,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use super::header::{fmt_cpu, fmt_mem};
+use super::header::{fmt_cpu, fmt_mem, usage_spans};
 use super::{btop_block_active, grad_at, make_gradient, meter_bar};
 
 /// Rows the panel wants (excluding borders); None when no hosts are configured.
 pub(crate) fn remote_rows(app: &App) -> Option<u16> {
-    let hosts = app.remote.as_ref()?.hosts.lock().ok()?;
-    Some(hosts.iter().map(|h| 1 + h.sessions.len() as u16).sum())
+    let remote = app.remote.as_ref()?;
+    let hosts = remote.hosts.lock().ok()?;
+    let costs = remote.ccusage.iter().filter(|h| h.visible()).count() as u16;
+    Some(hosts.iter().map(|h| 1 + h.sessions.len() as u16).sum::<u16>() + costs)
 }
 
 pub(crate) fn draw_remote_panel(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
@@ -29,7 +31,10 @@ pub(crate) fn draw_remote_panel(f: &mut Frame, app: &App, area: Rect, theme: &Th
         width: area.width.saturating_sub(2),
         height: area.height.saturating_sub(2),
     };
-    let Some(hosts) = app.remote.as_ref().and_then(|r| r.hosts.lock().ok()) else {
+    let Some(remote) = app.remote.as_ref() else {
+        return;
+    };
+    let Ok(hosts) = remote.hosts.lock() else {
         return;
     };
     let name_w = hosts
@@ -39,8 +44,13 @@ pub(crate) fn draw_remote_panel(f: &mut Frame, app: &App, area: Rect, theme: &Th
         .unwrap_or(8)
         .min(20);
     let mut lines = Vec::new();
-    for h in hosts.iter() {
+    for (i, h) in hosts.iter().enumerate() {
         lines.push(host_line(h, name_w, theme));
+        if let Some(cost) = remote.ccusage.get(i).filter(|c| c.visible()) {
+            let mut spans = vec![Span::raw(" ".repeat(name_w + 2))];
+            spans.extend(usage_spans(cost, theme));
+            lines.push(Line::from(spans));
+        }
         for s in &h.sessions {
             let (dot, style) = match s.working {
                 Some(true) => (

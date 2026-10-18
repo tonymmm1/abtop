@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::collector::ccusage;
 use crate::host_info::GpuInfo;
 use crate::locale::t;
 use crate::model::SessionStatus;
@@ -112,14 +113,132 @@ pub(crate) fn draw_header(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 
-    if area.height >= 2 && !app.gpus.is_empty() {
+    if area.height >= 2 && header_rows(app) == 2 {
         let row = Rect {
             y: area.y + 1,
             height: 1,
             ..area
         };
-        f.render_widget(Paragraph::new(gpu_line(&app.gpus, width, theme)), row);
+        // GPU bars on the left, ccusage costs right-aligned.
+        let cost = app
+            .ccusage
+            .as_ref()
+            .filter(|h| h.visible())
+            .map(|h| usage_spans(h, theme))
+            .unwrap_or_default();
+        let cost_w = spans_width(&cost);
+        let mut spans = if app.gpus.is_empty() {
+            Vec::new()
+        } else {
+            gpu_line(&app.gpus, width.saturating_sub(cost_w), theme).spans
+        };
+        let pad = width.saturating_sub(spans_width(&spans) + cost_w);
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.extend(cost);
+        f.render_widget(Paragraph::new(Line::from(spans)), row);
     }
+}
+
+/// Header height: a second row appears for GPU bars or ccusage costs.
+pub(crate) fn header_rows(app: &App) -> u16 {
+    let ccusage = app.ccusage.as_ref().is_some_and(|h| h.visible());
+    if app.gpus.is_empty() && !ccusage {
+        1
+    } else {
+        2
+    }
+}
+
+fn spans_width(spans: &[Span]) -> usize {
+    spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+/// `5h $125→$1.2k $232/h 4h28m  today $670 2.0B  7d ▂▃▅▂▇▆█ $6.6k`
+/// (API list prices from ccusage). Shared with the remote hosts panel.
+pub(crate) fn usage_spans(h: &ccusage::Handle, theme: &Theme) -> Vec<Span<'static>> {
+    let dim = Style::default().fg(theme.graph_text);
+    let val = Style::default()
+        .fg(theme.main_fg)
+        .add_modifier(Modifier::BOLD);
+    let Ok(state) = h.state.lock() else {
+        return Vec::new();
+    };
+    let mut spans = vec![Span::styled("ccusage ", dim)];
+    let Some(u) = &state.usage else {
+        match &state.error {
+            Some(e) => spans.push(Span::styled(format!("{e} "), Style::default().fg(Color::Red))),
+            None => spans.push(Span::styled("loading… ", dim)),
+        }
+        return spans;
+    };
+    spans.push(Span::styled("5h ", dim));
+    match &u.block {
+        Some(b) => {
+            spans.push(Span::styled(fmt_usd(b.cost), val));
+            spans.push(Span::styled(format!("→{} ", fmt_usd(b.projected)), dim));
+            spans.push(Span::styled(format!("{}/h ", fmt_usd(b.per_hour)), val));
+            spans.push(Span::styled(
+                format!("{}h{:02}m  ", b.remaining_min / 60, b.remaining_min % 60),
+                dim,
+            ));
+        }
+        None => spans.push(Span::styled("idle  ", dim)),
+    }
+    spans.push(Span::styled("today ", dim));
+    spans.push(Span::styled(fmt_usd(u.today_cost), val));
+    spans.push(Span::styled(format!(" {}  ", fmt_count(u.today_tokens)), dim));
+    spans.push(Span::styled("7d ", dim));
+    spans.push(Span::styled(
+        sparkline(&u.week),
+        Style::default().fg(theme.proc_misc),
+    ));
+    spans.push(Span::styled(
+        format!(" {}", fmt_usd(u.week.iter().sum())),
+        val,
+    ));
+    let tail = match (&state.error, state.loading) {
+        (Some(_), _) => Span::styled(" ! ", Style::default().fg(Color::Red)),
+        (None, true) => Span::styled(" … ", dim),
+        _ => Span::raw("  "),
+    };
+    spans.push(tail);
+    spans
+}
+
+/// "$125", "$1.2k", "$12k".
+fn fmt_usd(v: f64) -> String {
+    if v >= 9_999.5 {
+        format!("${:.0}k", v / 1_000.0)
+    } else if v >= 999.5 {
+        format!("${:.1}k", v / 1_000.0)
+    } else {
+        format!("${v:.0}")
+    }
+}
+
+/// Token counts up to billions: "2.0B", "410M", "12k".
+fn fmt_count(n: u64) -> String {
+    if n >= 999_950_000 {
+        format!("{:.1}B", n as f64 / 1e9)
+    } else {
+        super::fmt_tokens(n)
+    }
+}
+
+/// One block character per value, scaled to the largest.
+fn sparkline(values: &[f64]) -> String {
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let max = values.iter().cloned().fold(0.0, f64::max);
+    values
+        .iter()
+        .map(|v| {
+            if max <= 0.0 {
+                BARS[0]
+            } else {
+                BARS[((v / max) * 7.0).round() as usize]
+            }
+        })
+        .collect()
 }
 
 /// `GPU0 RTX 2080 SUPER ■■■■■■  37%  vram ■■■■■■ 0.1/8.0G` per GPU; names are
@@ -269,6 +388,16 @@ mod tests {
             assert_eq!(super::fmt_rate(bps).chars().count(), 7, "{bps}");
         }
         assert_eq!(super::fmt_rate(1.2e6), " 1.2M/s");
+    }
+
+    #[test]
+    fn cost_formats() {
+        assert_eq!(super::fmt_usd(125.1), "$125");
+        assert_eq!(super::fmt_usd(1162.8), "$1.2k");
+        assert_eq!(super::fmt_usd(18_400.0), "$18k");
+        assert_eq!(super::fmt_count(2_009_191_372), "2.0B");
+        assert_eq!(super::sparkline(&[0.0, 50.0, 100.0]), "▁▅█");
+        assert_eq!(super::sparkline(&[0.0, 0.0]), "▁▁");
     }
 
     #[test]

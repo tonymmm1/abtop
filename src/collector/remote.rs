@@ -87,6 +87,8 @@ pub struct HostStatus {
 
 pub struct Handle {
     pub hosts: Arc<Mutex<Vec<HostStatus>>>,
+    /// One ccusage poller per host, same order as `hosts`.
+    pub ccusage: Vec<super::ccusage::Handle>,
 }
 
 fn hosts_path() -> Option<PathBuf> {
@@ -148,12 +150,19 @@ pub fn start(configs: Vec<HostConfig>) -> Handle {
     if let Some(dir) = control_dir() {
         let _ = std::fs::create_dir_all(dir);
     }
+    let ccusage = configs
+        .iter()
+        .map(|cfg| {
+            let cfg = cfg.clone();
+            super::ccusage::start(move || run_ssh(&cfg, super::ccusage::SCRIPT, true))
+        })
+        .collect();
     for (i, cfg) in configs.into_iter().enumerate() {
         let hosts = hosts.clone();
         std::thread::spawn(move || {
             let mut prev_cpu: Option<(u64, u64)> = None;
             loop {
-                let result = run_probe(&cfg);
+                let result = run_ssh(&cfg, PROBE, false);
                 if let Ok(mut all) = hosts.lock() {
                     let h = &mut all[i];
                     match result {
@@ -189,14 +198,16 @@ pub fn start(configs: Vec<HostConfig>) -> Handle {
             }
         });
     }
-    Handle { hosts }
+    Handle { hosts, ccusage }
 }
 
 fn control_dir() -> Option<PathBuf> {
     dirs::cache_dir().map(|d| d.join("abtop"))
 }
 
-fn run_probe(cfg: &HostConfig) -> Result<String, String> {
+/// Run `script` on the host with `sh -s`. With `ccusage`, the exit status is
+/// mapped by `ccusage::script_result` (127 = not installed).
+fn run_ssh(cfg: &HostConfig, script: &str, ccusage: bool) -> Result<String, String> {
     let mut cmd = Command::new("ssh");
     cmd.args([
         "-T",
@@ -229,9 +240,13 @@ fn run_probe(cfg: &HostConfig) -> Result<String, String> {
         .spawn()
         .map_err(|e| format!("ssh: {e}"))?;
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(PROBE.as_bytes());
+        let _ = stdin.write_all(script.as_bytes());
     }
     let out = child.wait_with_output().map_err(|e| format!("ssh: {e}"))?;
+    // 255 is ssh's own failure; anything else came from the script.
+    if ccusage && out.status.code() != Some(255) {
+        return super::ccusage::script_result(out.status.code(), &out.stdout, &out.stderr);
+    }
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let line = err

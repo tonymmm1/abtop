@@ -238,6 +238,7 @@ fn run_app(
         if !hosts.is_empty() {
             app.remote = Some(collector::remote::start(hosts));
         }
+        app.ccusage = Some(collector::ccusage::start_local());
     }
     app.accounts_open = std::env::args().any(|a| a == "--accounts");
     if !demo_mode {
@@ -374,6 +375,7 @@ fn handle_key_press(
             KeyCode::Char('c') => app.toggle_config(),
             KeyCode::Char('v') => app.toggle_view_menu(),
             KeyCode::Char('a') => app.accounts_open = true,
+            KeyCode::Char('U') => app.refresh_ccusage(),
             KeyCode::Char('?') => app.toggle_help(),
             KeyCode::Char('/') => app.filter_active = true,
             KeyCode::Esc if !app.filter_text.is_empty() => app.clear_filter(),

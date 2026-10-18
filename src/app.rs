@@ -160,6 +160,8 @@ pub struct App {
     pub remote: Option<crate::collector::remote::Handle>,
     /// Background CLIProxyAPI quota poller; None when no management key is configured.
     pub cliproxy: Option<crate::collector::cliproxy::Handle>,
+    /// Local ccusage cost poller; None in demo mode.
+    pub ccusage: Option<crate::collector::ccusage::Handle>,
 }
 
 impl App {
@@ -232,6 +234,7 @@ impl App {
             accounts_scroll: 0,
             cliproxy: None,
             remote: None,
+            ccusage: None,
         }
     }
 
@@ -504,6 +507,15 @@ impl App {
     }
 
     /// Set a transient status message that auto-clears after 3 seconds.
+    /// Re-run ccusage here and on every remote host.
+    pub fn refresh_ccusage(&mut self) {
+        let remote = self.remote.iter().flat_map(|r| &r.ccusage);
+        for h in self.ccusage.iter().chain(remote) {
+            h.refresh();
+        }
+        self.set_status("ccusage: refreshing…".into());
+    }
+
     pub fn set_status(&mut self, msg: String) {
         self.status_msg = Some((msg, Instant::now()));
     }

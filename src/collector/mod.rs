@@ -1,3 +1,4 @@
+pub mod ccusage;
 pub mod claude;
 pub mod cliproxy;
 pub mod codex;

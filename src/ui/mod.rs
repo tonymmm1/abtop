@@ -425,8 +425,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 fn desktop_layout(app: &App, area: Rect) -> DesktopLayout {
     const CONTEXT_MIN: u16 = 5;
     const MID_MIN: u16 = 6;
-    // Header gets a second row for GPU bars when any GPU is present.
-    let header_h: u16 = if app.gpus.is_empty() { 1 } else { 2 };
+    let header_h = header::header_rows(app);
     let fixed: u16 = header_h + 1; // header + footer
 
     let mut mid_sections = Vec::new();
@@ -1396,6 +1395,7 @@ mod tests {
         };
         app.remote = Some(crate::collector::remote::Handle {
             hosts: std::sync::Arc::new(std::sync::Mutex::new(vec![host("a"), host("b")])),
+            ccusage: Vec::new(),
         });
         let area = Rect {
             x: 0,
