@@ -73,6 +73,16 @@ impl Handle {
     pub fn refresh(&self) {
         let _ = self.refresh_tx.send(());
     }
+
+    /// A handle with fixed state and no poller thread.
+    #[cfg(test)]
+    pub(crate) fn with_state(state: State) -> Self {
+        Self {
+            url: String::new(),
+            state: Arc::new(Mutex::new(state)),
+            refresh_tx: mpsc::channel().0,
+        }
+    }
 }
 
 /// Env vars win over config so the key can stay out of config.toml.

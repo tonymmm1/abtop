@@ -448,10 +448,8 @@ fn desktop_layout(app: &App, area: Rect) -> DesktopLayout {
 
     let any_mid = !mid_sections.is_empty();
     // The CLIProxyAPI quota box lists every account, so let it grow past the default.
-    let mid_h_ideal: u16 = match app.show_quota.then(|| quota::cliproxy_rows(app)).flatten() {
-        Some(rows) => (rows + 2).max(8),
-        None => 8,
-    };
+    let cliproxy_rows = app.show_quota.then(|| quota::cliproxy_rows(app)).flatten();
+    let mid_h_ideal: u16 = cliproxy_rows.map_or(8, |rows| (rows + 2).max(8));
     let sessions_ideal: u16 = if app.show_sessions {
         (app.sessions.len() as u16 * 2 + 7).max(8)
     } else {
@@ -460,7 +458,13 @@ fn desktop_layout(app: &App, area: Rect) -> DesktopLayout {
     let context_ideal: u16 = (app.sessions.len() as u16 + 4).clamp(5, 10);
 
     let available = area.height.saturating_sub(fixed);
-    let mid_reserved = if any_mid { MID_MIN.min(available) } else { 0 };
+    // Sessions claim space first, so reserve the whole accounts list (up to half
+    // the screen) or every new session would squeeze it down to MID_MIN.
+    let mid_reserved = match (any_mid, cliproxy_rows) {
+        (false, _) => 0,
+        (true, Some(_)) => mid_h_ideal.min(available / 2).max(MID_MIN.min(available)),
+        (true, None) => MID_MIN.min(available),
+    };
     // Remote hosts panel: wants all its rows, but reserves at most a third of the screen.
     let remote_ideal = remote::remote_rows(app).map_or(0, |r| r + 2);
     let remote_reserved = remote_ideal.min(available / 3);
@@ -472,7 +476,8 @@ fn desktop_layout(app: &App, area: Rect) -> DesktopLayout {
     } else {
         0
     };
-    let after_sessions = available.saturating_sub(sessions_h);
+    // Leave the remote panel its reservation, or a tall quota box swallows it.
+    let after_sessions = available.saturating_sub(sessions_h + remote_reserved);
     let mid_h = if any_mid {
         mid_h_ideal
             .min(after_sessions)
@@ -1322,6 +1327,84 @@ mod tests {
             !text.contains("tokens"),
             "zoomed tab should hide peer sections\n{text}"
         );
+    }
+
+    #[test]
+    fn many_sessions_do_not_squeeze_cliproxy_quota() {
+        let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        crate::demo::populate_demo(&mut app);
+        let one = app.sessions[0].clone();
+        app.sessions = vec![one; 20];
+        let account = |provider: &str| crate::collector::cliproxy::Account {
+            provider: provider.into(),
+            name: "acct".into(),
+            plan: None,
+            windows: Vec::new(),
+            error: None,
+            disabled: false,
+            cooldown_until: None,
+            renews_at: None,
+        };
+        app.cliproxy = Some(crate::collector::cliproxy::Handle::with_state(
+            crate::collector::cliproxy::State {
+                accounts: vec![account("claude"), account("claude"), account("codex")],
+                ..Default::default()
+            },
+        ));
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 50,
+        };
+        let want = quota::cliproxy_rows(&app).unwrap() + 2;
+        let layout = desktop_layout(&app, area);
+        let quota_h = layout
+            .mid
+            .iter()
+            .find(|(s, _)| *s == NarrowSection::Quota)
+            .map(|(_, a)| a.height)
+            .unwrap();
+        assert_eq!(quota_h, want);
+    }
+
+    #[test]
+    fn remote_panel_keeps_its_rows_next_to_cliproxy_quota() {
+        let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        crate::demo::populate_demo(&mut app);
+        let one = app.sessions[0].clone();
+        app.sessions = vec![one; 20];
+        let account = |provider: &str| crate::collector::cliproxy::Account {
+            provider: provider.into(),
+            name: "acct".into(),
+            plan: None,
+            windows: Vec::new(),
+            error: None,
+            disabled: false,
+            cooldown_until: None,
+            renews_at: None,
+        };
+        app.cliproxy = Some(crate::collector::cliproxy::Handle::with_state(
+            crate::collector::cliproxy::State {
+                accounts: (0..12).map(|_| account("claude")).collect(),
+                ..Default::default()
+            },
+        ));
+        let host = |name: &str| crate::collector::remote::HostStatus {
+            name: name.into(),
+            ..Default::default()
+        };
+        app.remote = Some(crate::collector::remote::Handle {
+            hosts: std::sync::Arc::new(std::sync::Mutex::new(vec![host("a"), host("b")])),
+        });
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 50,
+        };
+        let layout = desktop_layout(&app, area);
+        assert_eq!(layout.remote.map(|r| r.height), Some(4));
     }
 
     #[test]
