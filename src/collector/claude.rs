@@ -620,7 +620,11 @@ impl ClaudeCollector {
         };
 
         let configured_model = read_configured_model(&sf.cwd);
-        let context_window = crate::collector::context_window_for_model(&model, &configured_model, max_context_tokens);
+        let context_window = crate::collector::context_window_for_model(
+            &model,
+            &configured_model,
+            max_context_tokens,
+        );
         let context_percent = if context_window > 0 {
             (last_context_tokens as f64 / context_window as f64) * 100.0
         } else {
@@ -1732,16 +1736,22 @@ fn parse_transcript_with_previous(
 ///    invoke the model, so treating them as a prompt would leave
 ///    `last_user_ts_ms` stuck and pin the session in Thinking forever.
 fn is_synthetic_user_msg(entry: &Value) -> bool {
-    if entry.get("isMeta").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if entry
+        .get("isMeta")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return true;
     }
-    let Some(message) = entry.get("message") else { return false };
+    let Some(message) = entry.get("message") else {
+        return false;
+    };
     match message.get("content") {
         Some(Value::Array(arr)) => {
             !arr.is_empty()
-                && arr.iter().all(|block| {
-                    block.get("type").and_then(|t| t.as_str()) == Some("tool_result")
-                })
+                && arr
+                    .iter()
+                    .all(|block| block.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
         }
         Some(Value::String(s)) => {
             let t = s.trim_start();
@@ -2364,15 +2374,18 @@ mod tests {
         // forever (Think generating reply). All three line shapes must be
         // treated as synthetic.
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        write_lines(&mut file, &[
-            // Real prompt + assistant reply to seed a clean Wait state.
-            r#"{"type":"user","timestamp":"2026-03-28T15:00:00Z","message":{"role":"user","content":"hi"}}"#,
-            r#"{"type":"assistant","timestamp":"2026-03-28T15:00:01Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"text","text":"hello"}]}}"#,
-            // The three user-role lines `/plugin update` writes:
-            r#"{"type":"user","timestamp":"2026-03-28T15:01:00Z","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: ...</local-command-caveat>"}}"#,
-            r#"{"type":"user","timestamp":"2026-03-28T15:01:00Z","message":{"role":"user","content":"<command-name>/plugin</command-name>\n<command-args>update foo</command-args>"}}"#,
-            r#"{"type":"user","timestamp":"2026-03-28T15:01:00Z","message":{"role":"user","content":"<local-command-stdout>Updated foo</local-command-stdout>"}}"#,
-        ]);
+        write_lines(
+            &mut file,
+            &[
+                // Real prompt + assistant reply to seed a clean Wait state.
+                r#"{"type":"user","timestamp":"2026-03-28T15:00:00Z","message":{"role":"user","content":"hi"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-03-28T15:00:01Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"text","text":"hello"}]}}"#,
+                // The three user-role lines `/plugin update` writes:
+                r#"{"type":"user","timestamp":"2026-03-28T15:01:00Z","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: ...</local-command-caveat>"}}"#,
+                r#"{"type":"user","timestamp":"2026-03-28T15:01:00Z","message":{"role":"user","content":"<command-name>/plugin</command-name>\n<command-args>update foo</command-args>"}}"#,
+                r#"{"type":"user","timestamp":"2026-03-28T15:01:00Z","message":{"role":"user","content":"<local-command-stdout>Updated foo</local-command-stdout>"}}"#,
+            ],
+        );
 
         let result = parse_transcript(file.path(), 0);
 
@@ -2390,11 +2403,14 @@ mod tests {
         // `!ls` and friends serialize as <bash-input>/<bash-stdout> user-role
         // lines with no assistant reply. Same failure mode as /plugin.
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        write_lines(&mut file, &[
-            r#"{"type":"assistant","timestamp":"2026-03-28T15:00:00Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"text","text":"ok"}]}}"#,
-            r#"{"type":"user","timestamp":"2026-03-28T15:00:05Z","message":{"role":"user","content":"<bash-input>ls</bash-input>"}}"#,
-            r#"{"type":"user","timestamp":"2026-03-28T15:00:05Z","message":{"role":"user","content":"<bash-stdout>a\nb</bash-stdout><bash-stderr></bash-stderr>"}}"#,
-        ]);
+        write_lines(
+            &mut file,
+            &[
+                r#"{"type":"assistant","timestamp":"2026-03-28T15:00:00Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"text","text":"ok"}]}}"#,
+                r#"{"type":"user","timestamp":"2026-03-28T15:00:05Z","message":{"role":"user","content":"<bash-input>ls</bash-input>"}}"#,
+                r#"{"type":"user","timestamp":"2026-03-28T15:00:05Z","message":{"role":"user","content":"<bash-stdout>a\nb</bash-stdout><bash-stderr></bash-stderr>"}}"#,
+            ],
+        );
 
         let result = parse_transcript(file.path(), 0);
 
@@ -3176,7 +3192,10 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
     #[test]
     fn test_context_window_for_model() {
         // Base model with low token usage → 200K
-        assert_eq!(crate::collector::context_window_for_model("claude-opus-4-6", "", 50_000), 200_000);
+        assert_eq!(
+            crate::collector::context_window_for_model("claude-opus-4-6", "", 50_000),
+            200_000
+        );
         // Explicit [1m] suffix in transcript model → 1M regardless of token count
         assert_eq!(
             crate::collector::context_window_for_model("claude-opus-4-6[1m]", "", 0),
@@ -3191,7 +3210,10 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
             crate::collector::context_window_for_model("claude-sonnet-4-6", "", 100_000),
             200_000
         );
-        assert_eq!(crate::collector::context_window_for_model("unknown-model", "", 0), 200_000);
+        assert_eq!(
+            crate::collector::context_window_for_model("unknown-model", "", 0),
+            200_000
+        );
         // Token usage exceeds 200K → must be 1M window
         assert_eq!(
             crate::collector::context_window_for_model("claude-opus-4-6", "", 250_000),

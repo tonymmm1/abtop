@@ -166,7 +166,10 @@ pub(crate) fn usage_spans(h: &ccusage::Handle, theme: &Theme) -> Vec<Span<'stati
     let mut spans = vec![Span::styled("ccusage ", dim)];
     let Some(u) = &state.usage else {
         match &state.error {
-            Some(e) => spans.push(Span::styled(format!("{e} "), Style::default().fg(Color::Red))),
+            Some(e) => spans.push(Span::styled(
+                format!("{e} "),
+                Style::default().fg(Color::Red),
+            )),
             None => spans.push(Span::styled("loading… ", dim)),
         }
         return spans;
@@ -186,7 +189,10 @@ pub(crate) fn usage_spans(h: &ccusage::Handle, theme: &Theme) -> Vec<Span<'stati
     }
     spans.push(Span::styled("today ", dim));
     spans.push(Span::styled(fmt_usd(u.today_cost), val));
-    spans.push(Span::styled(format!(" {}  ", fmt_count(u.today_tokens)), dim));
+    spans.push(Span::styled(
+        format!(" {}  ", fmt_count(u.today_tokens)),
+        dim,
+    ));
     spans.push(Span::styled("7d ", dim));
     spans.push(Span::styled(
         sparkline(&u.week),

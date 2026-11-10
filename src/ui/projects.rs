@@ -198,7 +198,10 @@ mod tests {
             .map(|y| (0..60).map(|x| buf[(x, y)].symbol()).collect())
             .collect();
         assert!(rows[1].contains("local×1 devbox×2"), "{rows:#?}");
-        assert!(rows[3].contains("api") && rows[3].contains("devbox×1"), "{rows:#?}");
+        assert!(
+            rows[3].contains("api") && rows[3].contains("devbox×1"),
+            "{rows:#?}"
+        );
         assert!(rows[4].contains("main ~2"), "{rows:#?}");
     }
 }

@@ -17,7 +17,13 @@ pub(crate) fn remote_rows(app: &App) -> Option<u16> {
     let remote = app.remote.as_ref()?;
     let hosts = remote.hosts.lock().ok()?;
     let costs = remote.ccusage.iter().filter(|h| h.visible()).count() as u16;
-    Some(hosts.iter().map(|h| 1 + h.sessions.len() as u16).sum::<u16>() + costs)
+    Some(
+        hosts
+            .iter()
+            .map(|h| 1 + h.sessions.len() as u16)
+            .sum::<u16>()
+            + costs,
+    )
 }
 
 pub(crate) fn draw_remote_panel(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {

@@ -197,7 +197,9 @@ fn fetch_all(
         .map(|f| {
             let idx = auth_index(f);
             let need_plan = provider_of(f) == "claude" && !cache.plan_tried.contains(&idx);
-            let need_usage = passive_windows(f, now).0.is_empty()
+            // Passive headers lack model-scoped windows (Fable), so Claude
+            // accounts still poll the usage endpoint on its slow cadence.
+            let need_usage = (provider_of(f) == "claude" || passive_windows(f, now).0.is_empty())
                 && cache
                     .usage
                     .get(&idx)
@@ -492,7 +494,7 @@ pub fn summarize(accounts: &[Account], provider: &str, now: i64) -> Vec<Summary>
 // ── response parsing (pure, unit-tested) ─────────────────────────────────────
 
 pub fn parse_claude(v: &Value) -> Vec<Window> {
-    CLAUDE_WINDOWS
+    let mut out: Vec<Window> = CLAUDE_WINDOWS
         .iter()
         .filter(|(key, _)| v[*key].get("utilization").is_some())
         .map(|(key, label)| Window {
@@ -500,7 +502,26 @@ pub fn parse_claude(v: &Value) -> Vec<Window> {
             remaining: num(&v[*key]["utilization"]).map(remaining),
             resets_at: ts(&v[*key]["resets_at"]),
         })
-        .collect()
+        .collect();
+    // Model-scoped weekly windows (e.g. Fable) only appear in `limits[]`.
+    for l in v["limits"].as_array().into_iter().flatten() {
+        if l["kind"].as_str() != Some("weekly_scoped") {
+            continue;
+        }
+        let Some(model) = str_of(&l["scope"]["model"]["display_name"]) else {
+            continue;
+        };
+        let label = format!("7-day {} limit", clean(&model));
+        if out.iter().any(|w| w.label == label) {
+            continue;
+        }
+        out.push(Window {
+            label,
+            remaining: num(&l["percent"]).map(remaining),
+            resets_at: ts(&l["resets_at"]),
+        });
+    }
+    out
 }
 
 pub fn parse_codex(v: &Value, now: i64) -> Vec<Window> {
@@ -663,11 +684,23 @@ mod tests {
             "five_hour": { "utilization": 40.0, "resets_at": "2026-10-18T16:30:00.123456+00:00" },
             "seven_day": { "utilization": 53, "resets_at": null },
             "seven_day_opus": null,
-            "iguana_necktie": { "utilization": 99 }
+            "iguana_necktie": { "utilization": 99 },
+            "limits": [
+                { "kind": "session", "percent": 18, "scope": null },
+                {
+                    "kind": "weekly_scoped", "percent": 6,
+                    "resets_at": "2026-10-18T16:30:00+00:00",
+                    "scope": { "model": { "id": null, "display_name": "Fable" } }
+                },
+                { "kind": "weekly_scoped", "percent": 1, "scope": { "model": null } }
+            ]
         });
         let w = parse_claude(&v);
-        // Model-scoped windows (Fable, Opus, ...) are intentionally ignored.
-        assert_eq!(w.len(), 2);
+        // Unknown top-level keys are ignored; model-scoped limits come from `limits[]`.
+        assert_eq!(w.len(), 3);
+        assert_eq!(w[2].label, "7-day Fable limit");
+        assert_eq!(w[2].remaining, Some(94.0));
+        assert_eq!(w[2].resets_at, Some(1792341000));
         assert_eq!(w[0].label, "7-day limit");
         assert_eq!(w[0].remaining, Some(47.0));
         assert_eq!(w[0].resets_at, None);
