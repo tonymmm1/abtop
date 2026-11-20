@@ -327,6 +327,11 @@ pub fn passive_windows(file: &Value, now: i64) -> (Vec<Window>, Option<i64>) {
             let prefix = format!("x-codex-{slot}");
             if let Some(used) = get(&format!("{prefix}-used-percent")) {
                 let secs = get(&format!("{prefix}-window-minutes")).map(|m| m as i64 * 60);
+                // A 0-minute window is how the headers say "no such window"
+                // (the usage endpoint returns `secondary_window: null`).
+                if secs == Some(0) {
+                    continue;
+                }
                 let label = format!("{} limit", window_name(secs, i));
                 out.push(window(label, used, get(&format!("{prefix}-reset-at"))));
             }
@@ -822,7 +827,10 @@ mod tests {
         let codex = json!({ "provider": "codex", "quota": { "signals": {
             "X-Codex-Primary-Used-Percent": "21",
             "X-Codex-Primary-Window-Minutes": "10080",
-            "X-Codex-Primary-Reset-At": "5000"
+            "X-Codex-Primary-Reset-At": "5000",
+            "X-Codex-Secondary-Used-Percent": "0",
+            "X-Codex-Secondary-Window-Minutes": "0",
+            "X-Codex-Secondary-Reset-After-Seconds": "0"
         }}});
         let (w, _) = passive_windows(&codex, 1000);
         assert_eq!(
