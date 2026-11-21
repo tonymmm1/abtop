@@ -27,9 +27,9 @@ const CLAUDE_USAGE: &str = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_PROFILE: &str = "https://api.anthropic.com/api/oauth/profile";
 const CODEX_USAGE: &str = "https://chatgpt.com/backend-api/wham/usage";
 const ANTIGRAVITY_QUOTA_URLS: &[&str] = &[
-    "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
-    "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:retrieveUserQuotaSummary",
-    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+    "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels",
+    "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
 ];
 const ANTIGRAVITY_LOAD_CODE_ASSIST: &str =
     "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
@@ -496,7 +496,7 @@ fn fetch_antigravity_usage(
                     if !windows.is_empty() {
                         return Ok(windows);
                     }
-                    last_err = Some("no quota groups returned".to_string());
+                    last_err = Some("no Gemini models returned".to_string());
                 }
                 Err(e) => last_err = Some(e),
             }
@@ -724,76 +724,33 @@ fn window_name(secs: Option<i64>, index: usize) -> &'static str {
     }
 }
 
-/// Parse Antigravity `retrieveUserQuotaSummary` response (`groups[].buckets[]`).
+/// Parse Antigravity `fetchAvailableModels` into one Gemini window.
 ///
-/// Buckets report `remainingFraction` (0.0–1.0) and `resetTime` (RFC 3339).
-/// Within each group, weekly buckets come before 5-hour buckets to match
-/// Claude and Codex ordering.
+/// Each model carries `quotaInfo { remainingFraction, resetTime }`. The JSON is
+/// proto3-encoded, so an exhausted model omits `remainingFraction` (zero) and
+/// keeps only `resetTime`. Gemini models report the most-drained one.
+// ponytail: single min-across-models window; split per model if Gemini Pro/Flash quotas diverge.
 pub fn parse_antigravity(v: &Value) -> Vec<Window> {
-    let Some(groups) = v["groups"].as_array() else {
+    let Some(models) = v["models"].as_object() else {
         return Vec::new();
     };
-    let multi_group = groups.len() > 1;
-    let mut out = Vec::new();
-    for (gi, g) in groups.iter().enumerate() {
-        let group_name = str_of(&g["displayName"])
-            .or_else(|| str_of(&g["display_name"]))
-            .unwrap_or_else(|| format!("Group {}", gi + 1));
-        let group_prefix = antigravity_group_prefix(&group_name);
-        let Some(buckets) = g["buckets"].as_array() else {
-            continue;
-        };
-        let mut parsed: Vec<(u8, Window)> = Vec::new();
-        for (bi, b) in buckets.iter().enumerate() {
-            let Some(frac) = num(&b["remainingFraction"])
-                .or_else(|| num(&b["remaining_fraction"]))
-            else {
-                continue;
-            };
-            let rem = (frac * 100.0).clamp(0.0, 100.0);
-            let win_kind = str_of(&b["window"]).unwrap_or_default().to_lowercase();
-            let (order, base_label) = match win_kind.as_str() {
-                "weekly" | "week" => (0u8, "Weekly limit".to_string()),
-                "5h" | "five-hour" | "five_hour" => (1u8, "5-hour limit".to_string()),
-                _ => {
-                    let fallback = str_of(&b["displayName"])
-                        .or_else(|| str_of(&b["display_name"]))
-                        .or_else(|| str_of(&b["bucketId"]))
-                        .or_else(|| str_of(&b["bucket_id"]))
-                        .unwrap_or_else(|| format!("Bucket {}", bi + 1));
-                    (2u8, clean(&fallback))
-                }
-            };
-            let label = if multi_group {
-                format!("{group_prefix} {}", base_label.to_lowercase())
-            } else {
-                base_label
-            };
-            let resets_at = ts(&b["resetTime"]).or_else(|| ts(&b["reset_time"]));
-            parsed.push((
-                order,
-                Window {
-                    label,
-                    remaining: Some(rem),
-                    resets_at,
-                },
-            ));
-        }
-        parsed.sort_by_key(|(order, _)| *order);
-        out.extend(parsed.into_iter().map(|(_, w)| w));
-    }
-    out
-}
-
-fn antigravity_group_prefix(name: &str) -> String {
-    let lower = name.to_ascii_lowercase();
-    if lower.contains("claude") && lower.contains("gpt") {
-        "Claude/GPT".to_string()
-    } else if lower.contains("gemini") {
-        "Gemini".to_string()
-    } else {
-        clean(name.trim_end_matches(" models").trim_end_matches(" Models"))
-    }
+    models
+        .iter()
+        .filter(|(id, _)| id.starts_with("gemini-"))
+        .filter_map(|(_, m)| {
+            let q = &m["quotaInfo"];
+            let reset = ts(&q["resetTime"]);
+            let frac = num(&q["remainingFraction"]).or(reset.map(|_| 0.0))?;
+            Some(((frac * 100.0).clamp(0.0, 100.0), reset))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(rem, resets_at)| Window {
+            label: "Gemini 5-hour limit".into(),
+            remaining: Some(rem),
+            resets_at,
+        })
+        .into_iter()
+        .collect()
 }
 
 /// Extract Antigravity subscription tier from `loadCodeAssist` response.
@@ -1101,57 +1058,24 @@ mod tests {
 
     #[test]
     fn antigravity_quota_and_plan_parsing() {
-        let single_group = json!({
-            "groups": [{
-                "displayName": "Claude and GPT models",
-                "buckets": [
-                    {
-                        "bucketId": "3p-5h",
-                        "window": "5h",
-                        "resetTime": "2026-11-21T04:37:13Z",
-                        "remainingFraction": 0.9301
-                    },
-                    {
-                        "bucketId": "3p-weekly",
-                        "window": "weekly",
-                        "resetTime": "2026-11-27T23:37:13Z",
-                        "remainingFraction": 0.96265
-                    }
-                ]
-            }]
+        let models = json!({
+            "models": {
+                "gemini-3-flash": { "quotaInfo": { "resetTime": "2026-11-21T04:37:13Z" } },
+                "gemini-2.5-pro": { "quotaInfo": { "remainingFraction": 0.5, "resetTime": "2026-11-21T04:37:13Z" } },
+                "claude-opus-5-5-high": { "quotaInfo": { "remainingFraction": 0.1, "resetTime": "2026-11-21T04:37:13Z" } },
+                "tab_flash_lite_preview": { "quotaInfo": { "remainingFraction": 1 } }
+            }
         });
-        let w = parse_antigravity(&single_group);
-        assert_eq!(w.len(), 2);
-        // Weekly sorted ahead of 5h
-        assert_eq!(w[0].label, "Weekly limit");
-        assert!((w[0].remaining.unwrap() - 96.265).abs() < 1e-6);
-        assert_eq!(w[0].resets_at, Some(1795822633));
-        assert_eq!(w[1].label, "5-hour limit");
-        assert!((w[1].remaining.unwrap() - 93.01).abs() < 1e-6);
-        assert_eq!(w[1].resets_at, Some(1795235833));
+        let w = parse_antigravity(&models);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].label, "Gemini 5-hour limit");
+        // Omitted remainingFraction with a resetTime means exhausted; Claude ignored.
+        assert_eq!(w[0].remaining, Some(0.0));
+        assert_eq!(w[0].resets_at, Some(1795235833));
 
-        let multi_group = json!({
-            "groups": [
-                {
-                    "displayName": "Gemini models",
-                    "buckets": [
-                        { "window": "weekly", "remainingFraction": 0.8 },
-                        { "window": "5h", "remainingFraction": 0.5 }
-                    ]
-                },
-                {
-                    "displayName": "Claude and GPT models",
-                    "buckets": [
-                        { "window": "weekly", "remainingFraction": 0.9 }
-                    ]
-                }
-            ]
-        });
-        let mw = parse_antigravity(&multi_group);
-        assert_eq!(mw.len(), 3);
-        assert_eq!(mw[0].label, "Gemini weekly limit");
-        assert_eq!(mw[1].label, "Gemini 5-hour limit");
-        assert_eq!(mw[2].label, "Claude/GPT weekly limit");
+        let fresh = json!({ "models": { "gemini-3-flash": { "quotaInfo": { "remainingFraction": 0.8 } } } });
+        assert_eq!(parse_antigravity(&fresh)[0].remaining, Some(80.0));
+        assert!(parse_antigravity(&json!({ "models": {} })).is_empty());
 
         let tier = json!({
             "currentTier": { "id": "free-tier", "name": "Antigravity" },
