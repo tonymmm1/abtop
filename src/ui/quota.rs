@@ -15,8 +15,22 @@ use super::{btop_block_active, fmt_tokens, grad_at, make_gradient, remaining_bar
 /// Data considered "stale" when its updated_at is older than this many seconds.
 const STALE_SECS: u64 = 600;
 
-/// Fixed source order so columns stay stable across runs.
+/// Fixed source order for the local (non-CLIProxyAPI) columns.
 const SOURCES: &[&str] = &["claude", "codex"];
+
+/// Provider sections shown in the CLIProxyAPI quota panel. Always includes
+/// Claude and Codex; adds Antigravity whenever at least one active Antigravity
+/// account is present in CLIProxyAPI.
+fn cliproxy_sources(accounts: &[Account]) -> Vec<&'static str> {
+    let mut out = vec!["claude", "codex"];
+    if accounts
+        .iter()
+        .any(|a| a.provider == "antigravity" && !a.disabled)
+    {
+        out.push("antigravity");
+    }
+    out
+}
 
 pub(crate) fn draw_quota_panel(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     draw_quota_panel_active(f, app, area, theme, false);
@@ -258,12 +272,13 @@ fn draw_cliproxy_rows(
     let width = area.width as usize;
     let mut lines = Vec::new();
 
+    let sources = cliproxy_sources(&state.accounts);
     let amount = |s: &Summary| format!("{:.0}% of {}%", s.sum, s.count * 100);
-    let per_source: Vec<Vec<Summary>> = SOURCES
+    let per_source: Vec<Vec<Summary>> = sources
         .iter()
         .map(|src| summarize(&state.accounts, src, now))
         .collect();
-    // Shared column widths so both providers line up.
+    // Shared column widths so all providers line up.
     let all = per_source.iter().flatten();
     let label_w = all
         .clone()
@@ -285,7 +300,7 @@ fn draw_cliproxy_rows(
     let cell_w = (width.saturating_sub(account_prefix_w(width)) / max_windows)
         .clamp(label_w + 8, label_w + 20);
 
-    for (i, (source, summaries)) in SOURCES.iter().zip(per_source).enumerate() {
+    for (i, (source, summaries)) in sources.iter().zip(per_source).enumerate() {
         let accounts: Vec<&Account> = active
             .iter()
             .copied()
@@ -426,7 +441,8 @@ fn account_prefix_w(width: usize) -> usize {
 pub(crate) fn cliproxy_rows(app: &App) -> Option<u16> {
     let state = app.cliproxy.as_ref()?.state.lock().ok()?;
     let now = chrono::Utc::now().timestamp();
-    let rows: usize = SOURCES
+    let sources = cliproxy_sources(&state.accounts);
+    let rows: usize = sources
         .iter()
         .map(|src| {
             let accounts = state
@@ -440,7 +456,7 @@ pub(crate) fn cliproxy_rows(app: &App) -> Option<u16> {
         })
         .sum();
     // blank line between providers
-    Some((rows + SOURCES.len() - 1) as u16)
+    Some((rows + sources.len().saturating_sub(1)) as u16)
 }
 
 /// Truncate with an ellipsis or right-pad to exactly `w` chars.
@@ -463,6 +479,10 @@ fn short_label(label: &str) -> String {
         "7-day" => "7d".into(),
         "Weekly" => "wk".into(),
         "Monthly" => "mo".into(),
+        "Gemini weekly" => "gem-wk".into(),
+        "Gemini 5-hour" => "gem-5h".into(),
+        "Claude/GPT weekly" => "3p-wk".into(),
+        "Claude/GPT 5-hour" => "3p-5h".into(),
         _ => l
             .strip_prefix("7-day ")
             .and_then(|rest| rest.split_whitespace().next())

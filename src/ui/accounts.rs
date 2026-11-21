@@ -13,7 +13,7 @@ use super::quota::format_reset_time;
 use super::{btop_block_active, grad_at, make_gradient, remaining_bar};
 
 const COL_W: usize = 28;
-const PROVIDERS: &[&str] = &["claude", "codex"];
+const PROVIDERS: &[&str] = &["claude", "codex", "antigravity"];
 
 pub(crate) fn draw_accounts(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     f.render_widget(

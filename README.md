@@ -204,7 +204,7 @@ In narrow terminals, `w`/`u`/`s` switch between the Work, Usage and System tabs,
 
 ### CLIProxyAPI accounts
 
-If you route agents through [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), abtop polls its management API for Claude and Codex auth files and shows per-account quota windows, plans, cooldowns, subscription end dates and reset timers.
+If you route agents through [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), abtop polls its management API for Claude, Codex, and Antigravity auth files and shows per-account quota windows, plans, cooldowns, subscription end dates and reset timers.
 
 - The quota panel shows pooled remaining quota per provider plus every active account. `a` (or `--accounts`) opens a full-screen accounts view.
 - The 60 s refresh only lists auth files on your local proxy. Upstream usage endpoints are called at most once an hour per account (every 5 minutes on a manual `r`), and only when the proxy has no recorded rate-limit headers for that account. On an error the last good numbers stay on screen.

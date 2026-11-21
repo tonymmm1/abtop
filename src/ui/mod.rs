@@ -1368,6 +1368,61 @@ mod tests {
     }
 
     #[test]
+    fn quota_panel_and_accounts_view_render_antigravity() {
+        let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
+        crate::demo::populate_demo(&mut app);
+        let acct = |provider: &str, name: &str, plan: &str| crate::collector::cliproxy::Account {
+            provider: provider.into(),
+            name: name.into(),
+            plan: Some(plan.into()),
+            windows: vec![
+                crate::collector::cliproxy::Window {
+                    label: "Weekly limit".into(),
+                    remaining: Some(96.0),
+                    resets_at: None,
+                },
+                crate::collector::cliproxy::Window {
+                    label: "5-hour limit".into(),
+                    remaining: Some(93.0),
+                    resets_at: None,
+                },
+            ],
+            error: None,
+            disabled: false,
+            cooldown_until: None,
+            renews_at: None,
+        };
+        app.cliproxy = Some(crate::collector::cliproxy::Handle::with_state(
+            crate::collector::cliproxy::State {
+                accounts: vec![
+                    acct("claude", "claude@example.com", "Max"),
+                    acct("codex", "codex@example.com", "Pro"),
+                    acct("antigravity", "agy@example.com", "Pro"),
+                ],
+                ..Default::default()
+            },
+        ));
+
+        // Main desktop view: quota panel shows ANTIGRAVITY alongside CLAUDE and CODEX.
+        let mut terminal = Terminal::new(TestBackend::new(140, 50)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let quota_text = format!("{}", terminal.backend());
+        assert!(quota_text.contains("CLAUDE"), "{quota_text}");
+        assert!(quota_text.contains("CODEX"), "{quota_text}");
+        assert!(quota_text.contains("ANTIGRAVITY"), "{quota_text}");
+        assert!(quota_text.contains("agy@"), "{quota_text}");
+
+        // Full-screen accounts view (`a`): shows ANTIGRAVITY section + windows.
+        app.accounts_open = true;
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let accounts_text = format!("{}", terminal.backend());
+        assert!(accounts_text.contains("ANTIGRAVITY"), "{accounts_text}");
+        assert!(accounts_text.contains("agy@example.com"), "{accounts_text}");
+        assert!(accounts_text.contains("96%"), "{accounts_text}");
+        assert!(accounts_text.contains("93%"), "{accounts_text}");
+    }
+
+    #[test]
     fn remote_panel_keeps_its_rows_next_to_cliproxy_quota() {
         let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
         crate::demo::populate_demo(&mut app);

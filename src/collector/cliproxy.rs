@@ -26,6 +26,14 @@ const DEFAULT_URL: &str = "http://localhost:8317";
 const CLAUDE_USAGE: &str = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_PROFILE: &str = "https://api.anthropic.com/api/oauth/profile";
 const CODEX_USAGE: &str = "https://chatgpt.com/backend-api/wham/usage";
+const ANTIGRAVITY_QUOTA_URLS: &[&str] = &[
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+    "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:retrieveUserQuotaSummary",
+    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+];
+const ANTIGRAVITY_LOAD_CODE_ASSIST: &str =
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+const ANTIGRAVITY_UA: &str = "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)";
 
 /// (usage response key, display label) in display order.
 const CLAUDE_WINDOWS: &[(&str, &str)] =
@@ -180,7 +188,12 @@ fn fetch_all(
         .as_array()
         .map(|a| a.iter().collect())
         .unwrap_or_default();
-    files.retain(|f| matches!(provider_of(f).as_str(), "claude" | "codex"));
+    files.retain(|f| {
+        matches!(
+            provider_of(f).as_str(),
+            "claude" | "codex" | "antigravity"
+        )
+    });
 
     // Usage endpoints are rate-limited upstream; only call them when due.
     let min_gap = if forced {
@@ -196,10 +209,13 @@ fn fetch_all(
         .filter(|f| !f["disabled"].as_bool().unwrap_or(false))
         .map(|f| {
             let idx = auth_index(f);
-            let need_plan = provider_of(f) == "claude" && !cache.plan_tried.contains(&idx);
+            let prov = provider_of(f);
+            let need_plan =
+                matches!(prov.as_str(), "claude" | "antigravity") && !cache.plan_tried.contains(&idx);
             // Passive headers lack model-scoped windows (Fable), so Claude
             // accounts still poll the usage endpoint on its slow cadence.
-            let need_usage = (provider_of(f) == "claude" || passive_windows(f, now).0.is_empty())
+            // Antigravity has no passive signals, so it also polls upstream.
+            let need_usage = (prov == "claude" || passive_windows(f, now).0.is_empty())
                 && cache
                     .usage
                     .get(&idx)
@@ -242,13 +258,22 @@ fn fetch_all(
 
     let mut accounts: Vec<Account> = files.iter().map(|f| build_account(f, cache, now)).collect();
     accounts.sort_by(|a, b| {
-        (a.provider != "claude", &a.provider, &a.name).cmp(&(
-            b.provider != "claude",
+        (provider_rank(&a.provider), &a.provider, &a.name).cmp(&(
+            provider_rank(&b.provider),
             &b.provider,
             &b.name,
         ))
     });
     Ok(accounts)
+}
+
+fn provider_rank(provider: &str) -> u8 {
+    match provider {
+        "claude" => 0,
+        "codex" => 1,
+        "antigravity" => 2,
+        _ => 3,
+    }
 }
 
 /// Combine CLIProxyAPI's passive header observations with the cached
@@ -264,10 +289,16 @@ fn build_account(file: &Value, cache: &Cache, now: i64) -> Account {
         &passive,
         observed_at,
     );
-    let codex_plan = str_of(&file["quota"]["signals"]["X-Codex-Plan-Type"])
-        .or_else(|| str_of(&file["id_token"]["plan_type"]));
+    let codex_plan = (provider == "codex")
+        .then(|| {
+            str_of(&file["quota"]["signals"]["X-Codex-Plan-Type"])
+                .or_else(|| str_of(&file["id_token"]["plan_type"]))
+        })
+        .flatten();
     Account {
         name: str_of(&file["email"])
+            .or_else(|| str_of(&file["account"]))
+            .or_else(|| str_of(&file["label"]))
             .or_else(|| str_of(&file["name"]))
             .unwrap_or_else(|| idx.clone()),
         plan: cache
@@ -314,28 +345,32 @@ pub fn passive_windows(file: &Value, now: i64) -> (Vec<Window>, Option<i64>) {
         }
     };
     let mut out = Vec::new();
-    if provider_of(file) == "claude" {
-        for (label, key) in [("7-day limit", "7d"), ("5-hour limit", "5h")] {
-            let prefix = format!("anthropic-ratelimit-unified-{key}");
-            if let Some(util) = get(&format!("{prefix}-utilization")) {
-                let reset = get(&format!("{prefix}-reset"));
-                out.push(window(label.to_string(), util * 100.0, reset));
-            }
-        }
-    } else {
-        for (i, slot) in ["primary", "secondary"].iter().enumerate() {
-            let prefix = format!("x-codex-{slot}");
-            if let Some(used) = get(&format!("{prefix}-used-percent")) {
-                let secs = get(&format!("{prefix}-window-minutes")).map(|m| m as i64 * 60);
-                // A 0-minute window is how the headers say "no such window"
-                // (the usage endpoint returns `secondary_window: null`).
-                if secs == Some(0) {
-                    continue;
+    match provider_of(file).as_str() {
+        "claude" => {
+            for (label, key) in [("7-day limit", "7d"), ("5-hour limit", "5h")] {
+                let prefix = format!("anthropic-ratelimit-unified-{key}");
+                if let Some(util) = get(&format!("{prefix}-utilization")) {
+                    let reset = get(&format!("{prefix}-reset"));
+                    out.push(window(label.to_string(), util * 100.0, reset));
                 }
-                let label = format!("{} limit", window_name(secs, i));
-                out.push(window(label, used, get(&format!("{prefix}-reset-at"))));
             }
         }
+        "codex" => {
+            for (i, slot) in ["primary", "secondary"].iter().enumerate() {
+                let prefix = format!("x-codex-{slot}");
+                if let Some(used) = get(&format!("{prefix}-used-percent")) {
+                    let secs = get(&format!("{prefix}-window-minutes")).map(|m| m as i64 * 60);
+                    // A 0-minute window is how the headers say "no such window"
+                    // (the usage endpoint returns `secondary_window: null`).
+                    if secs == Some(0) {
+                        continue;
+                    }
+                    let label = format!("{} limit", window_name(secs, i));
+                    out.push(window(label, used, get(&format!("{prefix}-reset-at"))));
+                }
+            }
+        }
+        _ => {}
     }
     (out, ts(&file["quota"]["observed_at"]))
 }
@@ -360,8 +395,8 @@ pub fn merge_windows(
     out
 }
 
-/// Usage-endpoint windows (when `need_usage`) and the Claude plan (when
-/// `need_plan`) for one account.
+/// Usage-endpoint windows (when `need_usage`) and the plan (when `need_plan`)
+/// for one account.
 fn fetch_usage(
     base: &str,
     key: &str,
@@ -370,37 +405,139 @@ fn fetch_usage(
     need_usage: bool,
 ) -> (Option<Result<Vec<Window>, String>>, Option<String>) {
     let idx = auth_index(file);
-    if provider_of(file) == "claude" {
-        let headers = json!({
-            "Authorization": "Bearer $TOKEN$",
-            "Content-Type": "application/json",
-            "User-Agent": "claude-cli/2.1.280 (external, cli)",
-            "anthropic-beta": "oauth-2025-04-20",
-        });
-        let plan = need_plan
-            .then(|| api_call(base, key, &idx, CLAUDE_PROFILE, &headers).ok())
-            .flatten()
-            .and_then(|p| claude_plan(&p));
-        let usage = need_usage
-            .then(|| api_call(base, key, &idx, CLAUDE_USAGE, &headers).map(|u| parse_claude(&u)));
-        return (usage, plan);
+    match provider_of(file).as_str() {
+        "claude" => {
+            let headers = json!({
+                "Authorization": "Bearer $TOKEN$",
+                "Content-Type": "application/json",
+                "User-Agent": "claude-cli/2.1.280 (external, cli)",
+                "anthropic-beta": "oauth-2025-04-20",
+            });
+            let plan = need_plan
+                .then(|| api_call(base, key, &idx, CLAUDE_PROFILE, &headers).ok())
+                .flatten()
+                .and_then(|p| claude_plan(&p));
+            let usage = need_usage.then(|| {
+                api_call(base, key, &idx, CLAUDE_USAGE, &headers).map(|u| parse_claude(&u))
+            });
+            (usage, plan)
+        }
+        "antigravity" => fetch_antigravity_usage(base, key, file, &idx, need_plan, need_usage),
+        _ => {
+            let mut headers = json!({
+                "Authorization": "Bearer $TOKEN$",
+                "Content-Type": "application/json",
+                "User-Agent": "codex-tui/0.149.1 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.149.1)",
+            });
+            if let Some(id) = str_of(&file["id_token"]["chatgpt_account_id"]) {
+                headers["Chatgpt-Account-Id"] = Value::String(id);
+            }
+            let usage = need_usage.then(|| {
+                api_call(base, key, &idx, CODEX_USAGE, &headers)
+                    .map(|u| parse_codex(&u, now_secs()))
+            });
+            (usage, None)
+        }
     }
-    let mut headers = json!({
+}
+
+fn fetch_antigravity_usage(
+    base: &str,
+    key: &str,
+    file: &Value,
+    idx: &str,
+    need_plan: bool,
+    need_usage: bool,
+) -> (Option<Result<Vec<Window>, String>>, Option<String>) {
+    let headers = json!({
         "Authorization": "Bearer $TOKEN$",
         "Content-Type": "application/json",
-        "User-Agent": "codex-tui/0.149.1 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.149.1)",
+        "User-Agent": ANTIGRAVITY_UA,
     });
-    if let Some(id) = str_of(&file["id_token"]["chatgpt_account_id"]) {
-        headers["Chatgpt-Account-Id"] = Value::String(id);
+    let mut project = str_of(&file["project_id"]).or_else(|| str_of(&file["projectId"]));
+
+    // Call loadCodeAssist when we need the tier plan or don't have a project_id yet.
+    let load_resp = (need_plan || (need_usage && project.is_none()))
+        .then(|| {
+            api_call_post(
+                base,
+                key,
+                idx,
+                ANTIGRAVITY_LOAD_CODE_ASSIST,
+                &headers,
+                r#"{"metadata":{"ideType":"ANTIGRAVITY"}}"#,
+            )
+            .ok()
+        })
+        .flatten();
+    let plan = if need_plan {
+        load_resp.as_ref().and_then(antigravity_plan)
+    } else {
+        None
+    };
+    if project.is_none() {
+        project = load_resp
+            .as_ref()
+            .and_then(|v| str_of(&v["cloudaicompanionProject"]));
     }
+
     let usage = need_usage.then(|| {
-        api_call(base, key, &idx, CODEX_USAGE, &headers).map(|u| parse_codex(&u, now_secs()))
+        let payload = match &project {
+            Some(p) => json!({ "project": p }).to_string(),
+            None => "{}".to_string(),
+        };
+        let mut last_err = None;
+        let mut any_ok = false;
+        for url in ANTIGRAVITY_QUOTA_URLS {
+            match api_call_post(base, key, idx, url, &headers, &payload) {
+                Ok(v) => {
+                    any_ok = true;
+                    let windows = parse_antigravity(&v);
+                    if !windows.is_empty() {
+                        return Ok(windows);
+                    }
+                    last_err = Some("no quota groups returned".to_string());
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        if any_ok {
+            Ok(Vec::new())
+        } else {
+            Err(last_err.unwrap_or_else(|| "antigravity quota failed".into()))
+        }
     });
-    (usage, None)
+    (usage, plan)
 }
 
 fn api_call(base: &str, key: &str, idx: &str, url: &str, header: &Value) -> Result<Value, String> {
-    let body = json!({ "auth_index": idx, "method": "GET", "url": url, "header": header });
+    api_call_req(base, key, idx, "GET", url, header, None)
+}
+
+fn api_call_post(
+    base: &str,
+    key: &str,
+    idx: &str,
+    url: &str,
+    header: &Value,
+    data: &str,
+) -> Result<Value, String> {
+    api_call_req(base, key, idx, "POST", url, header, Some(data))
+}
+
+fn api_call_req(
+    base: &str,
+    key: &str,
+    idx: &str,
+    method: &str,
+    url: &str,
+    header: &Value,
+    data: Option<&str>,
+) -> Result<Value, String> {
+    let mut body = json!({ "auth_index": idx, "method": method, "url": url, "header": header });
+    if let Some(d) = data {
+        body["data"] = Value::String(d.to_string());
+    }
     let resp = mgmt(base, key, "/v0/management/api-call", Some(&body))?;
     let code = resp["status_code"].as_i64().unwrap_or(0);
     let text = resp["body"].as_str().unwrap_or("");
@@ -585,6 +722,102 @@ fn window_name(secs: Option<i64>, index: usize) -> &'static str {
         _ if index == 0 => "5-hour",
         _ => "Weekly",
     }
+}
+
+/// Parse Antigravity `retrieveUserQuotaSummary` response (`groups[].buckets[]`).
+///
+/// Buckets report `remainingFraction` (0.0–1.0) and `resetTime` (RFC 3339).
+/// Within each group, weekly buckets come before 5-hour buckets to match
+/// Claude and Codex ordering.
+pub fn parse_antigravity(v: &Value) -> Vec<Window> {
+    let Some(groups) = v["groups"].as_array() else {
+        return Vec::new();
+    };
+    let multi_group = groups.len() > 1;
+    let mut out = Vec::new();
+    for (gi, g) in groups.iter().enumerate() {
+        let group_name = str_of(&g["displayName"])
+            .or_else(|| str_of(&g["display_name"]))
+            .unwrap_or_else(|| format!("Group {}", gi + 1));
+        let group_prefix = antigravity_group_prefix(&group_name);
+        let Some(buckets) = g["buckets"].as_array() else {
+            continue;
+        };
+        let mut parsed: Vec<(u8, Window)> = Vec::new();
+        for (bi, b) in buckets.iter().enumerate() {
+            let Some(frac) = num(&b["remainingFraction"])
+                .or_else(|| num(&b["remaining_fraction"]))
+            else {
+                continue;
+            };
+            let rem = (frac * 100.0).clamp(0.0, 100.0);
+            let win_kind = str_of(&b["window"]).unwrap_or_default().to_lowercase();
+            let (order, base_label) = match win_kind.as_str() {
+                "weekly" | "week" => (0u8, "Weekly limit".to_string()),
+                "5h" | "five-hour" | "five_hour" => (1u8, "5-hour limit".to_string()),
+                _ => {
+                    let fallback = str_of(&b["displayName"])
+                        .or_else(|| str_of(&b["display_name"]))
+                        .or_else(|| str_of(&b["bucketId"]))
+                        .or_else(|| str_of(&b["bucket_id"]))
+                        .unwrap_or_else(|| format!("Bucket {}", bi + 1));
+                    (2u8, clean(&fallback))
+                }
+            };
+            let label = if multi_group {
+                format!("{group_prefix} {}", base_label.to_lowercase())
+            } else {
+                base_label
+            };
+            let resets_at = ts(&b["resetTime"]).or_else(|| ts(&b["reset_time"]));
+            parsed.push((
+                order,
+                Window {
+                    label,
+                    remaining: Some(rem),
+                    resets_at,
+                },
+            ));
+        }
+        parsed.sort_by_key(|(order, _)| *order);
+        out.extend(parsed.into_iter().map(|(_, w)| w));
+    }
+    out
+}
+
+fn antigravity_group_prefix(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("claude") && lower.contains("gpt") {
+        "Claude/GPT".to_string()
+    } else if lower.contains("gemini") {
+        "Gemini".to_string()
+    } else {
+        clean(name.trim_end_matches(" models").trim_end_matches(" Models"))
+    }
+}
+
+/// Extract Antigravity subscription tier from `loadCodeAssist` response.
+/// Prefers `paidTier` over `currentTier` (matching CLIProxyAPI's console).
+pub fn antigravity_plan(v: &Value) -> Option<String> {
+    let paid = v.get("paidTier").or_else(|| v.get("paid_tier"));
+    let current = v.get("currentTier").or_else(|| v.get("current_tier"));
+    let tier = paid
+        .filter(|t| str_of(&t["id"]).is_some())
+        .or(current)?;
+    let id = str_of(&tier["id"]);
+    if let Some(id) = id.as_deref() {
+        let mapped = match id {
+            "g1-pro-tier" => Some("Pro"),
+            "g1-ultra-tier" => Some("Ultra"),
+            "g1-ultra-lite-tier" => Some("Ultra Lite"),
+            "free-tier" => Some("Free"),
+            _ => None,
+        };
+        if let Some(label) = mapped {
+            return Some(label.to_string());
+        }
+    }
+    str_of(&tier["name"]).map(|n| clean(&n))
 }
 
 fn claude_plan(profile: &Value) -> Option<String> {
@@ -864,6 +1097,75 @@ mod tests {
         );
         // no usage yet: passive only
         assert_eq!(merge_windows(&[], None, &passive, Some(2)), passive);
+    }
+
+    #[test]
+    fn antigravity_quota_and_plan_parsing() {
+        let single_group = json!({
+            "groups": [{
+                "displayName": "Claude and GPT models",
+                "buckets": [
+                    {
+                        "bucketId": "3p-5h",
+                        "window": "5h",
+                        "resetTime": "2026-11-21T04:37:13Z",
+                        "remainingFraction": 0.9301
+                    },
+                    {
+                        "bucketId": "3p-weekly",
+                        "window": "weekly",
+                        "resetTime": "2026-11-27T23:37:13Z",
+                        "remainingFraction": 0.96265
+                    }
+                ]
+            }]
+        });
+        let w = parse_antigravity(&single_group);
+        assert_eq!(w.len(), 2);
+        // Weekly sorted ahead of 5h
+        assert_eq!(w[0].label, "Weekly limit");
+        assert!((w[0].remaining.unwrap() - 96.265).abs() < 1e-6);
+        assert_eq!(w[0].resets_at, Some(1795822633));
+        assert_eq!(w[1].label, "5-hour limit");
+        assert!((w[1].remaining.unwrap() - 93.01).abs() < 1e-6);
+        assert_eq!(w[1].resets_at, Some(1795235833));
+
+        let multi_group = json!({
+            "groups": [
+                {
+                    "displayName": "Gemini models",
+                    "buckets": [
+                        { "window": "weekly", "remainingFraction": 0.8 },
+                        { "window": "5h", "remainingFraction": 0.5 }
+                    ]
+                },
+                {
+                    "displayName": "Claude and GPT models",
+                    "buckets": [
+                        { "window": "weekly", "remainingFraction": 0.9 }
+                    ]
+                }
+            ]
+        });
+        let mw = parse_antigravity(&multi_group);
+        assert_eq!(mw.len(), 3);
+        assert_eq!(mw[0].label, "Gemini weekly limit");
+        assert_eq!(mw[1].label, "Gemini 5-hour limit");
+        assert_eq!(mw[2].label, "Claude/GPT weekly limit");
+
+        let tier = json!({
+            "currentTier": { "id": "free-tier", "name": "Antigravity" },
+            "paidTier": { "id": "g1-pro-tier", "name": "Google AI Pro" }
+        });
+        assert_eq!(antigravity_plan(&tier), Some("Pro".into()));
+        assert_eq!(
+            antigravity_plan(&json!({ "currentTier": { "id": "free-tier", "name": "Antigravity" } })),
+            Some("Free".into())
+        );
+        assert_eq!(
+            antigravity_plan(&json!({ "paidTier": { "id": "g1-ultra-tier" } })),
+            Some("Ultra".into())
+        );
     }
 
     #[test]
