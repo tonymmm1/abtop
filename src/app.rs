@@ -538,7 +538,7 @@ impl App {
     fn newly_idle_agents(&mut self) -> Vec<&'static str> {
         const IDLE_TICKS: u8 = 3;
         let mut idle = Vec::new();
-        for cli in ["claude", "codex"] {
+        for cli in ["claude", "codex", "agy"] {
             let working = self
                 .sessions
                 .iter()
@@ -1064,6 +1064,7 @@ fn is_supported_agent_command(cmd: &str) -> bool {
     crate::collector::process::cmd_has_binary(cmd, "claude")
         || crate::collector::process::cmd_has_binary(cmd, "codex")
         || crate::collector::process::cmd_has_binary(cmd, "opencode")
+        || crate::collector::process::cmd_has_binary(cmd, "agy")
 }
 
 fn is_killable_agent_command(cmd: &str) -> bool {
@@ -1203,11 +1204,29 @@ mod tests {
     }
 
     #[test]
-    fn supported_agent_command_accepts_opencode() {
+    fn supported_agent_command_accepts_opencode_and_agy() {
         assert!(is_supported_agent_command("/usr/local/bin/claude"));
         assert!(is_supported_agent_command("codex --resume abc"));
         assert!(is_supported_agent_command("/opt/homebrew/bin/opencode"));
+        assert!(is_supported_agent_command(
+            "/home/u/.local/share/mise/installs/antigravity-cli/latest/agy --dangerously-skip-permissions"
+        ));
         assert!(!is_supported_agent_command("node server.js"));
+    }
+
+    #[test]
+    fn idle_alert_fires_for_agy() {
+        let mut app = App::new_with_config(Theme::default(), &[], Default::default());
+        let mut working = waiting_session("agy");
+        working.status = SessionStatus::Thinking;
+        app.sessions = vec![working];
+        assert!(app.newly_idle_agents().is_empty());
+
+        app.sessions = vec![waiting_session("agy")];
+        assert!(app.newly_idle_agents().is_empty());
+        assert!(app.newly_idle_agents().is_empty());
+        assert_eq!(app.newly_idle_agents(), vec!["agy"]);
+        assert!(app.newly_idle_agents().is_empty());
     }
 
     #[test]

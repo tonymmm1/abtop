@@ -20,7 +20,7 @@ pub(crate) fn draw_header(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let version = env!("CARGO_PKG_VERSION");
 
     // "claude 5/6" = working / live sessions per agent.
-    let counters: Vec<(String, bool)> = ["claude", "codex"]
+    let counters: Vec<(String, bool)> = ["claude", "codex", "agy"]
         .iter()
         .map(|cli| {
             let live = app

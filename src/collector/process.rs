@@ -498,15 +498,22 @@ fn windows_command_tokens(cmd: &str) -> Vec<String> {
 }
 
 pub fn collect_git_stats(cwd: &str) -> (u32, u32) {
+    let (_, added, modified) = collect_git_info(cwd);
+    (added, modified)
+}
+
+/// Collect git branch name plus (added, modified) file counts in one `git status` call.
+pub fn collect_git_info(cwd: &str) -> (String, u32, u32) {
     // Validate cwd is an existing directory before running git
     if !std::path::Path::new(cwd).is_dir() {
-        return (0, 0);
+        return (String::new(), 0, 0);
     }
     let output = Command::new("git")
-        .args(["-C", cwd, "status", "--porcelain"])
+        .args(["-C", cwd, "status", "--porcelain", "-b"])
         .output()
         .ok();
 
+    let mut branch = String::new();
     let mut added = 0u32;
     let mut modified = 0u32;
 
@@ -514,6 +521,10 @@ pub fn collect_git_stats(cwd: &str) -> (u32, u32) {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
+                if let Some(header) = line.strip_prefix("## ") {
+                    branch = parse_git_porcelain_branch(header);
+                    continue;
+                }
                 if line.len() < 2 {
                     continue;
                 }
@@ -527,7 +538,21 @@ pub fn collect_git_stats(cwd: &str) -> (u32, u32) {
         }
     }
 
-    (added, modified)
+    (branch, added, modified)
+}
+
+fn parse_git_porcelain_branch(header: &str) -> String {
+    let h = header.trim();
+    if let Some(unborn) = h.strip_prefix("No commits yet on ") {
+        return unborn.trim().to_string();
+    }
+    if let Some(unborn) = h.strip_prefix("Initial commit on ") {
+        return unborn.trim().to_string();
+    }
+    if h.starts_with("HEAD (") {
+        return "HEAD".to_string();
+    }
+    h.split("...").next().unwrap_or(h).trim().to_string()
 }
 
 #[cfg(test)]
@@ -659,5 +684,20 @@ mod tests {
         let mut m = HashMap::new();
         m.insert(20, proc(20, 99));
         assert!(!is_descendant_of(20, 7, &m));
+    }
+
+    #[test]
+    fn parses_git_porcelain_branch_headers() {
+        assert_eq!(parse_git_porcelain_branch("main...origin/main"), "main");
+        assert_eq!(
+            parse_git_porcelain_branch("feat/agy...fork/feat/agy [ahead 1]"),
+            "feat/agy"
+        );
+        assert_eq!(parse_git_porcelain_branch("feat/only-local"), "feat/only-local");
+        assert_eq!(
+            parse_git_porcelain_branch("No commits yet on main"),
+            "main"
+        );
+        assert_eq!(parse_git_porcelain_branch("HEAD (no branch)"), "HEAD");
     }
 }

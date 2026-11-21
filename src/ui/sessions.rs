@@ -137,6 +137,7 @@ pub(crate) fn draw_sessions_panel_active(
             "claude" => ("*CC", Color::Rgb(217, 119, 87)), // #D97757 terracotta
             "codex" => (">CD", Color::Rgb(122, 157, 255)), // #7A9DFF periwinkle
             "opencode" => ("#OC", Color::Rgb(74, 222, 128)), // #4ADE80 emerald
+            "agy" => ("^AG", Color::Rgb(192, 132, 252)),   // #C084FC violet
             other => {
                 let fallback: String = other.chars().take(3).collect::<String>().to_uppercase();
                 (
@@ -992,6 +993,19 @@ fn task_row_text(task_text: &str, max_width: usize) -> String {
 }
 
 pub(crate) fn shorten_model(model: &str, is_1m: bool) -> String {
+    if model == "MODEL_GOOGLE_GEMINI_INTERNAL_BYOM" {
+        return "byom".to_string();
+    }
+    if let Some(rest) = model.strip_prefix("gemini-") {
+        let rest = rest
+            .strip_suffix("-xhigh")
+            .or_else(|| rest.strip_suffix("-high"))
+            .or_else(|| rest.strip_suffix("-medium"))
+            .or_else(|| rest.strip_suffix("-low"))
+            .unwrap_or(rest);
+        let compact = rest.replace("hydrogen", "hydro");
+        return format!("gem{compact}");
+    }
     // "claude-opus-4-6" → "opus4.6", "claude-sonnet-4-6" → "sonnet4.6", "claude-haiku-4-5" → "haiku4.5"
     let s = model.strip_prefix("claude-").unwrap_or(model);
     let s = s.trim_end_matches("[1m]");
@@ -1013,27 +1027,42 @@ pub(crate) fn shorten_model(model: &str, is_1m: bool) -> String {
 /// Tool name → color mapping for timeline bars, using theme palette.
 fn tool_color(name: &str, theme: &Theme) -> Color {
     match name {
-        "Read" => theme.session_id, // typically a warm accent
-        "Edit" => theme.proc_misc,  // green/active color
-        "Write" => theme.cpu_box,   // box/border accent
-        "Bash" => theme.hi_fg,      // highlight foreground
+        "Read" | "read_file" | "view_file" | "view_file_outline" | "view_code_item" => {
+            theme.session_id
+        } // typically a warm accent
+        "Edit" | "edit_file" | "replace_file_content" | "multi_replace_file_content" => {
+            theme.proc_misc
+        } // green/active color
+        "Write" | "write_file" | "write_to_file" => theme.cpu_box, // box/border accent
+        "Bash" | "run_command" => theme.hi_fg,                     // highlight foreground
         "shell" | "exec_command" | "write_stdin" => theme.hi_fg,
         "apply_patch" => theme.proc_misc,
         "update_plan" => theme.title,
-        "spawn_agent" | "send_input" | "wait_agent" => theme.title,
+        "spawn_agent" | "send_input" | "wait_agent" | "invoke_subagent" | "define_subagent"
+        | "manage_subagents" | "run_workflow" | "swarm" => theme.title,
         "view_image" => theme.session_id,
-        "Grep" => theme.status_fg,  // status accent
-        "Glob" => theme.graph_text, // subtle text
+        "Grep" | "grep_search" | "search_web" => theme.status_fg, // status accent
+        "Glob" | "find_by_name" | "list_dir" => theme.graph_text, // subtle text
         "find" | "list_mcp_resources" | "read_mcp_resource" => theme.status_fg,
-        "Agent" => theme.title,       // title/emphasis
-        "Skill" => theme.selected_fg, // selected foreground
-        _ => theme.inactive_fg,       // fallback
+        "Agent" => theme.title,                        // title/emphasis
+        "Skill" | "ask_question" => theme.selected_fg, // selected foreground
+        _ => theme.inactive_fg,                        // fallback
     }
 }
 
 fn tool_label(name: &str) -> &str {
     match name {
         "exec_command" | "shell" => "Exec",
+        "run_command" => "Run",
+        "read_file" | "view_file" | "view_file_outline" | "view_code_item" => "Read",
+        "edit_file" | "replace_file_content" | "multi_replace_file_content" => "Edit",
+        "write_file" | "write_to_file" => "Write",
+        "grep_search" => "Grep",
+        "find_by_name" | "list_dir" => "Find",
+        "search_web" => "Web",
+        "ask_question" => "Ask",
+        "invoke_subagent" | "define_subagent" | "manage_subagents" => "Agent",
+        "run_workflow" => "Flow",
         "write_stdin" => "Input",
         "apply_patch" => "Patch",
         "update_plan" => "Plan",
@@ -1272,6 +1301,22 @@ mod tests {
         assert_eq!(tool_label("exec_command"), "Exec");
         assert_eq!(tool_label("update_plan"), "Plan");
         assert!(tool_label("exec_command").len() <= 6);
+    }
+
+    #[test]
+    fn agy_tools_and_models_format_cleanly() {
+        let theme = Theme::default();
+        assert_eq!(tool_color("run_command", &theme), tool_color("Bash", &theme));
+        assert_eq!(tool_color("read_file", &theme), tool_color("Read", &theme));
+        assert_eq!(tool_color("edit_file", &theme), tool_color("Edit", &theme));
+        assert_eq!(tool_color("write_file", &theme), tool_color("Write", &theme));
+        assert_eq!(tool_label("run_command"), "Run");
+        assert_eq!(tool_label("read_file"), "Read");
+        assert_eq!(tool_label("invoke_subagent"), "Agent");
+        assert_eq!(shorten_model("gemini-4-neon-xhigh", true), "gem4-neon");
+        assert_eq!(shorten_model("gemini-4-hydrogen-high", true), "gem4-hydro");
+        assert_eq!(shorten_model("gemini-3.8-flash-medium", true), "gem3.8-flash");
+        assert_eq!(shorten_model("MODEL_GOOGLE_GEMINI_INTERNAL_BYOM", false), "byom");
     }
 
     #[test]

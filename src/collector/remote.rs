@@ -29,15 +29,26 @@ fi
 now=$(date +%s)
 for d in /proc/[0-9]*; do
   comm=$(cat "$d/comm" 2>/dev/null) || continue
-  case "$comm" in claude|codex) ;; *) continue ;; esac
+  case "$comm" in claude|codex|agy) ;; *) continue ;; esac
   pid=${d#/proc/}
   ppid=$(awk '{print $4}' "$d/stat" 2>/dev/null)
-  case "$(cat "/proc/$ppid/comm" 2>/dev/null)" in claude|codex) continue ;; esac
+  case "$(cat "/proc/$ppid/comm" 2>/dev/null)" in claude|codex|agy) continue ;; esac
   cwd=$(readlink "$d/cwd" 2>/dev/null)
   f=
   if [ "$comm" = claude ]; then
     sid=$(sed -n 's/.*"sessionId" *: *"\([^"]*\)".*/\1/p' "$HOME/.claude/sessions/$pid.json" 2>/dev/null)
     [ -n "$sid" ] && f=$(ls -t "$HOME"/.claude/projects/*/"$sid".jsonl 2>/dev/null | head -n1)
+  elif [ "$comm" = agy ]; then
+    p=$(ls -l "$d/fd" 2>/dev/null | sed -n 's|.*-> \(.*/presence/[^/]*\.lock\)$|\1|p' | head -n1)
+    if [ -n "$p" ]; then
+      base=${p%/presence/*}
+      cid=${p##*/}; cid=${cid%.lock}
+    else
+      p=$(ls -l "$d/fd" 2>/dev/null | sed -n 's|.*-> \(.*/conversations/[^/]*\.db\)$|\1|p' | head -n1)
+      base=${p%/conversations/*}
+      cid=${p##*/}; cid=${cid%.db}
+    fi
+    [ -n "$cid" ] && f="$base/brain/$cid/.system_generated/logs/transcript.jsonl"
   else
     f=$(ls -l "$d/fd" 2>/dev/null | sed -n 's/.*-> \(.*rollout-.*\.jsonl\)$/\1/p' | head -n1)
   fi
@@ -353,7 +364,8 @@ load\t1.50\n\
 cores\t16\n\
 gpu\tNVIDIA GeForce RTX 3090, 40, 1024, 24576\n\
 proc\tclaude\t42\t5\tmain\t      3\t/home/alice/git/abtop\n\
-proc\tcodex\t43\t-\t\t0\t/home/alice/my project\n";
+proc\tcodex\t43\t-\t\t0\t/home/alice/my project\n\
+proc\tagy\t44\t12\tfeat/agy\t1\t/home/alice/git/abtop\n";
         let p = parse_probe(out);
         assert_eq!(p.hostname, "devbox");
         assert_eq!(p.cpu, Some((150, 850)));
@@ -361,11 +373,15 @@ proc\tcodex\t43\t-\t\t0\t/home/alice/my project\n";
         assert_eq!(p.load1, 1.5);
         assert_eq!(p.cores, 16);
         assert_eq!(p.gpus.len(), 1);
-        assert_eq!(p.sessions.len(), 2);
+        assert_eq!(p.sessions.len(), 3);
         assert_eq!(p.sessions[0].working, Some(true));
         assert_eq!(p.sessions[0].project, "abtop");
         assert_eq!(p.sessions[0].dirty, 3);
         assert_eq!(p.sessions[1].working, None);
         assert_eq!(p.sessions[1].project, "my project");
+        assert_eq!(p.sessions[2].agent, "agy");
+        assert_eq!(p.sessions[2].working, Some(true));
+        assert_eq!(p.sessions[2].branch, "feat/agy");
+        assert_eq!(p.sessions[2].dirty, 1);
     }
 }

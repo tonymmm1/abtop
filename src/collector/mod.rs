@@ -1,3 +1,4 @@
+pub mod agy;
 pub mod ccusage;
 pub mod claude;
 pub mod cliproxy;
@@ -8,6 +9,7 @@ pub mod process;
 pub mod rate_limit;
 pub mod remote;
 
+pub use agy::AgyCollector;
 pub use claude::ClaudeCollector;
 pub use codex::CodexCollector;
 pub use mcp::McpServer;
@@ -61,9 +63,10 @@ pub(crate) fn redact_secrets(s: &str) -> String {
     let mut result = s.to_string();
     for pat in PATTERNS {
         while let Some(pos) = result.find(pat) {
-            let end = result[pos..]
+            let after_pat = pos + pat.len();
+            let end = result[after_pat..]
                 .find(char::is_whitespace)
-                .map(|i| pos + i)
+                .map(|i| after_pat + i)
                 .unwrap_or(result.len());
             result.replace_range(pos..end, "[REDACTED]");
         }
@@ -293,7 +296,7 @@ pub struct MultiCollector {
     cached_ports: HashMap<u32, Vec<u16>>,
     /// PID set snapshot from last port scan — invalidate cache when PIDs change.
     cached_port_pids: Vec<u32>,
-    cached_git: HashMap<String, (u32, u32)>,
+    cached_git: HashMap<String, (String, u32, u32)>,
     /// Port-owning children from previous ticks, keyed by child PID.
     /// Used to detect orphans when a session dies.
     tracked_port_children: HashMap<u32, TrackedPortChild>,
@@ -337,6 +340,9 @@ impl MultiCollector {
         }
         if !is_hidden("opencode") {
             collectors.push(Box::new(OpenCodeCollector::new()));
+        }
+        if !is_hidden("agy") {
+            collectors.push(Box::new(AgyCollector::new()));
         }
         let codex_enabled = !is_hidden("codex");
         Self {
@@ -435,18 +441,21 @@ impl MultiCollector {
             .map(|s| s.cwd.as_str())
             .filter(|cwd| !self.cached_git.contains_key(*cwd))
             .collect();
-        let fresh: Vec<(String, (u32, u32))> = std::thread::scope(|sc| {
+        let fresh: Vec<(String, (String, u32, u32))> = std::thread::scope(|sc| {
             let handles: Vec<_> = missing
                 .into_iter()
-                .map(|cwd| sc.spawn(move || (cwd.to_string(), process::collect_git_stats(cwd))))
+                .map(|cwd| sc.spawn(move || (cwd.to_string(), process::collect_git_info(cwd))))
                 .collect();
             handles.into_iter().filter_map(|h| h.join().ok()).collect()
         });
         self.cached_git.extend(fresh);
         for s in &mut all {
-            if let Some(&(added, modified)) = self.cached_git.get(&s.cwd) {
-                s.git_added = added;
-                s.git_modified = modified;
+            if let Some((branch, added, modified)) = self.cached_git.get(&s.cwd) {
+                if s.git_branch.is_empty() && !branch.is_empty() {
+                    s.git_branch = branch.clone();
+                }
+                s.git_added = *added;
+                s.git_modified = *modified;
             }
         }
 
@@ -513,27 +522,35 @@ mod tests {
     #[test]
     fn with_hidden_empty_keeps_all_collectors() {
         let mc = MultiCollector::with_hidden(&[]);
-        assert_eq!(mc.collectors.len(), 3);
+        assert_eq!(mc.collectors.len(), 4);
     }
 
     #[test]
     fn with_hidden_codex_drops_codex_only() {
         let mc = MultiCollector::with_hidden(&["codex".to_string()]);
-        assert_eq!(mc.collectors.len(), 2);
+        assert_eq!(mc.collectors.len(), 3);
+    }
+
+    #[test]
+    fn with_hidden_agy_drops_agy_only() {
+        let mc = MultiCollector::with_hidden(&["agy".to_string()]);
+        assert_eq!(mc.collectors.len(), 3);
     }
 
     #[test]
     fn with_hidden_is_case_insensitive() {
         let mc = MultiCollector::with_hidden(&["CODEX".to_string()]);
-        assert_eq!(mc.collectors.len(), 2);
+        assert_eq!(mc.collectors.len(), 3);
         let mc = MultiCollector::with_hidden(&["Claude".to_string()]);
-        assert_eq!(mc.collectors.len(), 2);
+        assert_eq!(mc.collectors.len(), 3);
+        let mc = MultiCollector::with_hidden(&["AGY".to_string()]);
+        assert_eq!(mc.collectors.len(), 3);
     }
 
     #[test]
     fn with_hidden_unknown_names_are_ignored() {
         let mc = MultiCollector::with_hidden(&["kiro".to_string(), "gemini".to_string()]);
-        assert_eq!(mc.collectors.len(), 3);
+        assert_eq!(mc.collectors.len(), 4);
     }
 
     #[test]
@@ -542,6 +559,7 @@ mod tests {
             "claude".to_string(),
             "codex".to_string(),
             "opencode".to_string(),
+            "agy".to_string(),
         ]);
         assert!(mc.collectors.is_empty());
     }
@@ -562,6 +580,18 @@ mod tests {
         });
 
         assert_eq!(scanner.cached_for(&[42]), cached);
+    }
+
+    #[test]
+    fn redact_secrets_redacts_bearer_and_prefixed_tokens() {
+        assert_eq!(
+            redact_secrets("curl -H Authorization: Bearer tok123 https://x"),
+            "curl -H Authorization: [REDACTED] https://x"
+        );
+        assert_eq!(
+            redact_secrets("key=sk-ant-secret123 done"),
+            "key=[REDACTED] done"
+        );
     }
 
     #[test]

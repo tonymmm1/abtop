@@ -124,7 +124,7 @@ fn host_line(h: &HostStatus, name_w: usize, theme: &Theme) -> Line<'static> {
     }
 
     // Same "working/live" counters as the header; green when nothing is working.
-    for agent in ["claude", "codex"] {
+    for agent in ["claude", "codex", "agy"] {
         let live = h.sessions.iter().filter(|s| s.agent == agent);
         let working = live.clone().filter(|s| s.working == Some(true)).count();
         let style = if working == 0 {
